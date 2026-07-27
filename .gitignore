@@ -1,0 +1,10 @@
+dist
+native/*.dll
+native/*.exe
+native/*.exp
+native/*.lib
+node_modules
+src-tauri/target
+src-tauri/*.dll
+src-tauri/*.exe
+src-tauri/*.lib
