@@ -85,6 +85,8 @@ CompressionContext::CompressionContext(int macro_bytes, int mini_bytes,
 
   CUDA_CHECK(cudaMalloc(&d_payload, payload_alloc_size));
   CUDA_CHECK(cudaMalloc(&d_gpu_hash, sizeof(uint64_t)));
+  CUDA_CHECK(cudaMalloc(&d_overflow_flag, sizeof(uint32_t)));
+  CUDA_CHECK(cudaMallocHost(&host_overflow_flag, sizeof(uint32_t)));
 
   size_t sort_bytes = 0, scan_bytes = 0;
   cub::DoubleBuffer<uint64_t> d_keys_db(d_keys, d_keys_alt);
@@ -137,6 +139,8 @@ CompressionContext::~CompressionContext() {
   cudaFree(d_dense_words);
   cudaFree(d_payload);
   cudaFree(d_gpu_hash);
+  cudaFree(d_overflow_flag);
+  cudaFreeHost(host_overflow_flag);
   cudaFree(d_temp_storage);
 
   cudaEventDestroy(e_start);
@@ -161,16 +165,7 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
     return;
   }
 
-  bool all_equal = true;
-  uint8_t first_byte = host_in[0];
-  for (int i = 1; i < n; i++) {
-    if (host_in[i] != first_byte) {
-      all_equal = false;
-      break;
-    }
-  }
-
-  if (all_equal) {
+  if (std::memcmp(host_in, host_in + 1, n - 1) == 0) {
     is_raw = 2;
     comp_size = 1;
     host_out[0] = host_in[0];
@@ -227,6 +222,25 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
     k *= 2;
   }
 
+  if (*host_last_rank < n) {
+    // Input is strictly periodic (period P < n), so suffix ranks cannot be
+    // unique. Inverse BWT pointer jumping requires a single cycle of length n,
+    // so fall back to raw mode.
+    is_raw = 1;
+    comp_size = n;
+    std::memcpy(host_out, host_in, n);
+    CUDA_CHECK(cudaMemsetAsync(d_gpu_hash, 0, sizeof(uint64_t), stream));
+    int hash_threads = 256;
+    int hash_blocks = ((n + 7) / 8 + hash_threads - 1) / hash_threads;
+    gpu_hash_kernel<<<hash_blocks, hash_threads, 0, stream>>>(d_data,
+                                                              d_gpu_hash, n);
+    CUDA_CHECK(cudaMemcpyAsync(&gpu_hash, d_gpu_hash, sizeof(uint64_t),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaEventRecord(e_end, stream));
+    cudaStreamSynchronize(stream);
+    return;
+  }
+
   extract_bwt_kernel<<<blocks, 256, 0, stream>>>(d_sa_db.Current(), d_data,
                                                  d_bwt, d_primary_idx, n);
   CUDA_CHECK(cudaMemcpyAsync(&primary_idx, d_primary_idx, sizeof(int),
@@ -244,11 +258,32 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
   build_tans_all_kernel<<<1, 257, 0, stream>>>(
       d_hist, d_p, d_prefix_p, d_max_x, d_symbol_spread, d_enc_table,
       d_dec_table, d_dec_symbol, d_next_state, L, 257);
+  CUDA_CHECK(cudaMemsetAsync(d_overflow_flag, 0, sizeof(uint32_t), stream));
   tabled_encode_kernel<<<z_blocks, threads_comp, (L + 514) * sizeof(int),
                          stream>>>(d_out_symbols, d_chunk_sym_lens, d_out_words,
                                    d_chunk_bit_lens, d_p, d_prefix_p, d_max_x,
                                    d_enc_table, num_chunks, mini_chunk_size,
-                                   max_words, L);
+                                   max_words, L, d_overflow_flag);
+  CUDA_CHECK(cudaMemcpyAsync(host_overflow_flag, d_overflow_flag,
+                             sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+  CUDA_CHECK(cudaStreamSynchronize(stream));
+
+  if (*host_overflow_flag != 0) {
+    // Bitstream overflow detected -> Fallback to Raw Mode!
+    is_raw = 1;
+    comp_size = n;
+    std::memcpy(host_out, host_in, n);
+    CUDA_CHECK(cudaMemsetAsync(d_gpu_hash, 0, sizeof(uint64_t), stream));
+    int hash_threads = 256;
+    int hash_blocks = ((n + 7) / 8 + hash_threads - 1) / hash_threads;
+    gpu_hash_kernel<<<hash_blocks, hash_threads, 0, stream>>>(d_data,
+                                                              d_gpu_hash, n);
+    CUDA_CHECK(cudaMemcpyAsync(&gpu_hash, d_gpu_hash, sizeof(uint64_t),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaEventRecord(e_end, stream));
+    cudaStreamSynchronize(stream);
+    return;
+  }
 
   int c_blocks = (num_chunks + 255) / 256;
   bit_to_word_kernel<<<c_blocks, 256, 0, stream>>>(
@@ -397,19 +432,27 @@ DecompressionContext::DecompressionContext(int macro_bytes, int mini_bytes,
   temp_storage_bytes = std::max(sort_bytes, scan_bytes) + 65536;
   CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
 
-  // OPTIMIZATION FIX: Set-aside exactly dec_bytes (16 KB) rather than 32 MB!
-  CUDA_CHECK(cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, dec_bytes));
-
-  cudaStreamAttrValue attr;
-  std::memset(&attr, 0, sizeof(attr));
-  attr.accessPolicyWindow.base_ptr = (void *)d_decoding_table;
-  attr.accessPolicyWindow.num_bytes = dec_bytes;
-  attr.accessPolicyWindow.hitRatio = 1.0f; // 100% L2 Persistence Preference
-  attr.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
-  attr.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
-
-  CUDA_CHECK(cudaStreamSetAttribute(
-      stream, cudaStreamAttributeAccessPolicyWindow, &attr));
+#if CUDART_VERSION >= 11000
+  if (cudaDeviceGetLimit(&orig_l2_limit, cudaLimitPersistingL2CacheSize) ==
+          cudaSuccess &&
+      cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, dec_bytes) ==
+          cudaSuccess) {
+    l2_modified = true;
+    cudaStreamAttrValue attr;
+    std::memset(&attr, 0, sizeof(attr));
+    attr.accessPolicyWindow.base_ptr = (void *)d_decoding_table;
+    attr.accessPolicyWindow.num_bytes = dec_bytes;
+    attr.accessPolicyWindow.hitRatio = 1.0f; // 100% L2 Persistence Preference
+    attr.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
+    attr.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
+    if (cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow,
+                               &attr) != cudaSuccess) {
+      cudaGetLastError();
+    }
+  } else {
+    cudaGetLastError();
+  }
+#endif
 
   // -------------------------------------------------------------------------
   // PRE-CAPTURE: Inverse BWT CUDA Graph for full-size macro chunks
@@ -462,7 +505,11 @@ DecompressionContext::DecompressionContext(int macro_bytes, int mini_bytes,
         curr_D, d_bwt, d_data, d_primary_idx, d_offsets, d_sizes);
 
     CUDA_CHECK(cudaStreamEndCapture(stream, &graph));
+#if CUDART_VERSION >= 11040
     CUDA_CHECK(cudaGraphInstantiateWithFlags(&graph_exec, graph, 0));
+#else
+    CUDA_CHECK(cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0));
+#endif
   }
 
   CUDA_CHECK(cudaEventCreate(&e_start));
@@ -473,6 +520,13 @@ DecompressionContext::~DecompressionContext() {
   if (stream) {
     cudaStreamSynchronize(stream);
   }
+
+#if CUDART_VERSION >= 11000
+  if (l2_modified) {
+    cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, orig_l2_limit);
+    cudaGetLastError();
+  }
+#endif
 
   if (graph_exec) {
     cudaGraphExecDestroy(graph_exec);
@@ -519,6 +573,9 @@ DecompressionContext::~DecompressionContext() {
 
 bool DecompressionContext::decompress_chunk(int threads_decomp,
                                             int mini_chunk_size) {
+  if (comp_size <= 0 || uncomp_size <= 0 || uncomp_size > macro_size) {
+    return false;
+  }
   CUDA_CHECK(cudaEventRecord(e_start, stream));
 
   CUDA_CHECK(cudaMemcpyAsync(d_payload, host_in, comp_size,
