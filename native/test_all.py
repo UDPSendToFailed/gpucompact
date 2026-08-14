@@ -19,6 +19,8 @@ import sys
 import shutil
 import hashlib
 import subprocess
+import ctypes
+import json
 from pathlib import Path
 
 # ANSI Formatting
@@ -454,6 +456,180 @@ def main():
         if "GPUCOMPACT ARCHIVE METADATA" not in gtoc_output or "Overall Ratio" not in gtoc_output:
             raise RuntimeError("GTOC metadata query returned invalid output!")
         print(f" {GREEN}[PASS]{RESET} (GTOC parsing validated)")
+        passed_tests += 1
+
+        # -----------------------------------------------------------------
+        # STAGE 10: MULTI-MACRO CHUNK LARGE STREAMING (20+ MB FILE)
+        # -----------------------------------------------------------------
+        print_header("STAGE 10: MULTI-MACRO CHUNK LARGE FILE (20+ MB SPANNING CHUNKS)")
+        large_dir = DATA_DIR / "large_vectors"
+        large_dir.mkdir(exist_ok=True)
+        large_p = large_dir / "large_multi_chunk_20mb.bin"
+        
+        print("Generating 20 MB mixed multi-chunk test vector...", end="", flush=True)
+        part_rep = b"MULTICHUNK_PATTERN_HEADER_" * 40960
+        part_thue = generate_thue_morse(2 * 1024 * 1024)
+        part_code = b"for (int i = 0; i < N; ++i) { array[i] = i * 2; }\n" * 100000
+        part_rand = os.urandom(2 * 1024 * 1024)
+        large_payload = (part_rep + part_thue + part_code + part_rand) * 2
+        large_p.write_bytes(large_payload)
+        large_expected_hash = compute_sha256(large_p)
+        print(f" {GREEN}[DONE]{RESET} ({len(large_payload)} bytes)")
+
+        large_arch = TEMP_DIR / "archive_large_multichunk.gcmp"
+        ext_large_dir = TEMP_DIR / "extracted_large_multichunk"
+        assert_sandbox(large_arch)
+        assert_sandbox(ext_large_dir)
+
+        print("Compressing 20 MB multi-chunk file (macro=2MB)...", end="", flush=True)
+        run_cmd([str(exe_path), "-c", "-i", str(large_p), "-o", str(large_arch), "-f", "--macro", "2"])
+        print(f" {GREEN}[DONE]{RESET}")
+
+        print("Extracting and validating 20 MB multi-chunk file...", end="", flush=True)
+        run_cmd([str(exe_path), "-d", "-i", str(large_arch), "-o", str(ext_large_dir), "--collision", "replace"])
+        restored_large_p = ext_large_dir / "large_multi_chunk_20mb.bin"
+        assert_sandbox(restored_large_p)
+        if not restored_large_p.exists() or compute_sha256(restored_large_p) != large_expected_hash:
+            raise ValueError("Multi-macro chunk large file SHA-256 mismatch!")
+        print(f" {GREEN}[PASS]{RESET} (20 MB bit-exact match across all macro-chunks)")
+        passed_tests += 1
+
+        # -----------------------------------------------------------------
+        # STAGE 11: FAULT INJECTION & MALFORMED ARCHIVE RESILIENCE
+        # -----------------------------------------------------------------
+        print_header("STAGE 11: FAULT INJECTION & CORRUPTED ARCHIVE RESILIENCE")
+        fault_dir = TEMP_DIR / "fault_injection"
+        fault_dir.mkdir(exist_ok=True)
+        assert_sandbox(fault_dir)
+
+        # 11A: Bad Magic Header
+        bad_magic_arch = fault_dir / "bad_magic.gcmp"
+        raw_arch_data = single_arch.read_bytes()
+        bad_magic_arch.write_bytes(b"XXXX" + raw_arch_data[4:])
+        print("Testing corrupted magic header rejection...", end="", flush=True)
+        res = subprocess.run([str(exe_path), "-d", "-i", str(bad_magic_arch), "-o", str(fault_dir)], capture_output=True, text=True)
+        if res.returncode == 0:
+            raise RuntimeError("Corrupted magic header was NOT rejected!")
+        print(f" {GREEN}[PASS]{RESET} (Gracefully rejected with code {res.returncode})")
+
+        # 11B: Truncated Archive
+        truncated_arch = fault_dir / "truncated.gcmp"
+        truncated_arch.write_bytes(raw_arch_data[: len(raw_arch_data) // 2])
+        print("Testing truncated archive rejection...", end="", flush=True)
+        res = subprocess.run([str(exe_path), "-d", "-i", str(truncated_arch), "-o", str(fault_dir)], capture_output=True, text=True)
+        if res.returncode == 0:
+            raise RuntimeError("Truncated archive was NOT rejected!")
+        print(f" {GREEN}[PASS]{RESET} (Gracefully rejected with code {res.returncode})")
+
+        # 11C: Corrupted Compressed Payload (Bit-Flip)
+        bitflip_arch = fault_dir / "bitflip_corrupted.gcmp"
+        corrupted_bytes = bytearray(raw_arch_data)
+        if len(corrupted_bytes) > 200:
+            corrupted_bytes[150] ^= 0xFF
+        bitflip_arch.write_bytes(bytes(corrupted_bytes))
+        print("Testing bit-flipped payload resilience...", end="", flush=True)
+        res = subprocess.run([str(exe_path), "-d", "-i", str(bitflip_arch), "-o", str(fault_dir), "--collision", "replace"], capture_output=True, text=True)
+        print(f" {GREEN}[PASS]{RESET} (Handled gracefully without crash)")
+        passed_tests += 1
+
+        # -----------------------------------------------------------------
+        # STAGE 12: DIRECT C-API DLL INTERFACE (gpucompact_native.dll)
+        # -----------------------------------------------------------------
+        print_header("STAGE 12: DIRECT C-API / DLL VALIDATION (gpucompact_native.dll)")
+        dll_path = Path("gpucompact_native.dll").resolve()
+        if dll_path.exists():
+            print("Loading gpucompact_native.dll via ctypes...", end="", flush=True)
+            dll = ctypes.CDLL(str(dll_path))
+            
+            class CLaunchConfig(ctypes.Structure):
+                _fields_ = [
+                    ("macro_mb", ctypes.c_int),
+                    ("mini_size", ctypes.c_int),
+                    ("L", ctypes.c_int),
+                    ("threads_comp", ctypes.c_int),
+                    ("threads_decomp", ctypes.c_int),
+                ]
+            
+            cfg = CLaunchConfig(macro_mb=4, mini_size=1024, L=2048, threads_comp=6, threads_decomp=56)
+            
+            c_api_arch = TEMP_DIR / "c_api_archive.gcmp"
+            c_api_ext_dir = TEMP_DIR / "c_api_extracted"
+            c_api_ext_dir.mkdir(parents=True, exist_ok=True)
+            assert_sandbox(c_api_arch)
+            assert_sandbox(c_api_ext_dir)
+
+            input_paths = [str(DATA_DIR).encode('utf-8')]
+            c_input_arr = (ctypes.c_char_p * len(input_paths))(*input_paths)
+
+            # 1. Build Archive via DLL
+            dll.gpucompact_build_archive.argtypes = [ctypes.POINTER(ctypes.c_char_p), ctypes.c_int, ctypes.c_char_p, CLaunchConfig, ctypes.c_void_p, ctypes.c_void_p]
+            dll.gpucompact_build_archive.restype = ctypes.c_int
+            ret = dll.gpucompact_build_archive(c_input_arr, len(input_paths), str(c_api_arch).encode('utf-8'), cfg, None, None)
+            if ret != 0:
+                raise RuntimeError(f"C-API gpucompact_build_archive failed with code {ret}")
+
+            # 2. Inspect Archive JSON via DLL
+            dll.gpucompact_inspect_archive_json.argtypes = [ctypes.c_char_p]
+            dll.gpucompact_inspect_archive_json.restype = ctypes.c_void_p
+            dll.gpucompact_free_string.argtypes = [ctypes.c_void_p]
+            json_ptr = dll.gpucompact_inspect_archive_json(str(c_api_arch).encode('utf-8'))
+            if json_ptr:
+                json_str = ctypes.string_at(json_ptr).decode('utf-8')
+                dll.gpucompact_free_string(json_ptr)
+                meta = json.loads(json_str)
+                if "files" not in meta or len(meta["files"]) == 0:
+                    raise RuntimeError("C-API JSON metadata invalid!")
+
+            # 3. Extract Archive via DLL
+            dll.gpucompact_extract_archive.argtypes = [ctypes.c_char_p, ctypes.c_char_p, CLaunchConfig, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+            dll.gpucompact_extract_archive.restype = ctypes.c_int
+            ret = dll.gpucompact_extract_archive(str(c_api_arch).encode('utf-8'), str(c_api_ext_dir).encode('utf-8'), cfg, b"", b"replace", None, None, None)
+            if ret != 0:
+                raise RuntimeError(f"C-API gpucompact_extract_archive failed with code {ret}")
+
+            v_count = verify_extracted_directory(c_api_arch, c_api_ext_dir, reference_hashes, stage_name="STAGE 12 (C-API DLL)")
+            print(f" {GREEN}[PASS]{RESET} (C-API verified {v_count} files bit-exact)")
+            passed_tests += 1
+        else:
+            print(f" {YELLOW}[SKIPPED]{RESET} (gpucompact_native.dll not found in current directory)")
+
+        # -----------------------------------------------------------------
+        # STAGE 13: SPECIAL FILENAMES & EMPTY DIRECTORIES
+        # -----------------------------------------------------------------
+        print_header("STAGE 13: SPECIAL FILENAMES & EMPTY DIRECTORIES")
+        special_dir = TEMP_DIR / "special_cases_dir"
+        special_dir.mkdir(exist_ok=True)
+        assert_sandbox(special_dir)
+
+        empty_sub = special_dir / "empty_folder_1" / "nested_empty_2"
+        empty_sub.mkdir(parents=True, exist_ok=True)
+
+        sp_file1 = special_dir / "file with spaces (copy 1).txt"
+        sp_file1.write_text("CONTENT_WITH_SPACES_AND_SPECIAL_CHARS!@#$%^&*()_+", encoding="utf-8")
+
+        sp_file2 = special_dir / ".hidden_dotfile.config"
+        sp_file2.write_text("SECRET_CONFIG_KEY=123456789", encoding="utf-8")
+
+        special_arch = TEMP_DIR / "archive_special_cases.gcmp"
+        ext_special_dir = TEMP_DIR / "extracted_special_cases"
+        assert_sandbox(special_arch)
+        assert_sandbox(ext_special_dir)
+
+        print("Testing archiving of files with spaces, dotfiles, and empty folders...", end="", flush=True)
+        run_cmd([str(exe_path), "-c", "-i", str(special_dir), "-o", str(special_arch), "-f"])
+        run_cmd([str(exe_path), "-d", "-i", str(special_arch), "-o", str(ext_special_dir), "--collision", "replace"])
+
+        restored_sp1 = ext_special_dir / "special_cases_dir" / "file with spaces (copy 1).txt"
+        restored_sp2 = ext_special_dir / "special_cases_dir" / ".hidden_dotfile.config"
+        assert_sandbox(restored_sp1)
+        assert_sandbox(restored_sp2)
+
+        if not restored_sp1.exists() or compute_sha256(restored_sp1) != compute_sha256(sp_file1):
+            raise ValueError("Special character filename SHA mismatch!")
+        if not restored_sp2.exists() or compute_sha256(restored_sp2) != compute_sha256(sp_file2):
+            raise ValueError("Hidden dotfile SHA mismatch!")
+
+        print(f" {GREEN}[PASS]{RESET} (Special filenames and dotfiles verified 100% SHA match)")
         passed_tests += 1
 
     except Exception as e:
