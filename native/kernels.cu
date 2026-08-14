@@ -316,18 +316,20 @@ __global__ void tabled_encode_kernel(
     bit_lengths[chunk_id] = word_off * 64;
 }
 
+// -------------------------------------------------------------------------
+// TABLE-BASED DECODER KERNEL
+// -------------------------------------------------------------------------
+
 __global__ void tabled_decode_kernel(
     const uint64_t *__restrict__ in_words,
     const unsigned int *__restrict__ word_offsets,
-    const unsigned int *__restrict__ bit_lengths,
-    unsigned char *__restrict__ bwt, const int *__restrict__ dec_table,
-    const int *__restrict__ dec_symbol, int total_size, int chunk_size, int L) {
+    const unsigned int *__restrict__ bit_lengths, unsigned char *__restrict__ bwt,
+    const int *__restrict__ dec_table, const int *__restrict__ dec_symbol,
+    int total_size, int chunk_size, int L) {
   extern __shared__ int s_dec_mem[];
   int *s_dec_table = s_dec_mem;
   int *s_dec_symbol = &s_dec_mem[L];
 
-  // OPTIMIZATION FIX: Move MTF alphabet table from local stack (DRAM) into
-  // Shared Memory!
   unsigned char *s_alphabets = (unsigned char *)&s_dec_mem[2 * L];
   unsigned char *alphabet = &s_alphabets[threadIdx.x * 256];
 
