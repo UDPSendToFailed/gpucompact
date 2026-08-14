@@ -61,6 +61,13 @@ __global__ void fill_sequence_kernel(int *__restrict__ out, int n);
 // -------------------------------------------------------------------------
 // BWT & TANS KERNEL PROTOTYPES
 // -------------------------------------------------------------------------
+__global__ void sa_4byte_keys_kernel(const unsigned char *__restrict__ T,
+                                     uint32_t *__restrict__ keys,
+                                     int *__restrict__ sa, int n);
+
+__global__ void sa_diff_32_kernel(const uint32_t *__restrict__ sorted_keys,
+                                  int *__restrict__ diff, int n);
+
 __global__ void sa_key_kernel(const int *__restrict__ rank,
                               int *__restrict__ sa, uint64_t *__restrict__ keys,
                               int n, int k, int rank_shift);
@@ -81,6 +88,7 @@ __global__ void
 zrle_encode_kernel(const unsigned char *__restrict__ bwt,
                    unsigned short *__restrict__ out_symbols,
                    unsigned int *__restrict__ chunk_symbol_lengths,
+                   uint32_t *__restrict__ hist,
                    int total_size, int chunk_size, int threads_comp);
 
 __global__ void

@@ -184,45 +184,70 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
       cudaMemcpyAsync(d_data, host_in, n, cudaMemcpyHostToDevice, stream));
 
   int blocks = (n + 255) / 256;
-  cast_uint8_to_int32_kernel<<<blocks, 256, 0, stream>>>(d_data, d_rank, n);
-
   int rank_bits = (int)std::ceil(std::log2((double)n));
   int key_bits = std::min(64, rank_bits * 2);
-  int k = 1;
-  int max_iter = rank_bits + 2;
 
   cub::DoubleBuffer<uint64_t> d_keys_db(d_keys, d_keys_alt);
   cub::DoubleBuffer<int> d_sa_db(d_sa, d_sa_alt);
 
-  // ASYNC SA DOUBLING WITH PINNED MEMORY EARLY EXIT CHECK
-  for (int iter = 0; iter < max_iter; iter++) {
-    sa_key_kernel<<<blocks, 256, 0, stream>>>(d_rank, d_sa_db.Current(),
-                                              d_keys_db.Current(), n, k,
-                                              rank_bits);
+  // PASS 0: 4-Byte Coarse Jumpstart (32-bit single-pass sort)
+  // Packs 4 consecutive cyclic bytes into uint32_t and sorts in one 32-bit pass
+  cub::DoubleBuffer<uint32_t> d_keys32_db(
+      reinterpret_cast<uint32_t *>(d_keys),
+      reinterpret_cast<uint32_t *>(d_keys_alt));
+  sa_4byte_keys_kernel<<<blocks, 256, 0, stream>>>(
+      d_data, d_keys32_db.Current(), d_sa_db.Current(), n);
 
-    size_t t_bytes = temp_storage_bytes;
-    cub::DeviceRadixSort::SortPairs(d_temp_storage, t_bytes, d_keys_db, d_sa_db,
-                                    n, 0, key_bits, stream);
+  size_t t_bytes = temp_storage_bytes;
+  cub::DeviceRadixSort::SortPairs(d_temp_storage, t_bytes, d_keys32_db,
+                                  d_sa_db, n, 0, 32, stream);
 
-    sa_diff_kernel<<<blocks, 256, 0, stream>>>(d_keys_db.Current(), d_diff, n);
+  sa_diff_32_kernel<<<blocks, 256, 0, stream>>>(d_keys32_db.Current(), d_diff, n);
 
-    t_bytes = temp_storage_bytes;
-    cub::DeviceScan::InclusiveSum(d_temp_storage, t_bytes, d_diff,
-                                  d_unique_ranks, n, stream);
+  t_bytes = temp_storage_bytes;
+  cub::DeviceScan::InclusiveSum(d_temp_storage, t_bytes, d_diff,
+                                d_unique_ranks, n, stream);
 
-    sa_rank_kernel<<<blocks, 256, 0, stream>>>(d_unique_ranks,
-                                               d_sa_db.Current(), d_rank, n);
+  sa_rank_kernel<<<blocks, 256, 0, stream>>>(d_unique_ranks,
+                                             d_sa_db.Current(), d_rank, n);
 
-    // Asynchronous transfer to pinned memory + stream synchronization
-    CUDA_CHECK(cudaMemcpyAsync(host_last_rank, d_unique_ranks + n - 1,
-                               sizeof(int), cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+  CUDA_CHECK(cudaMemcpyAsync(host_last_rank, d_unique_ranks + n - 1,
+                             sizeof(int), cudaMemcpyDeviceToHost, stream));
+  CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    if (*host_last_rank == n) {
-      break; // Early exit when Suffix Array is 100% sorted
+  // If 4-byte prefixes are not unique, continue doubling from k = 4 (skips k=1, 2)
+  if (*host_last_rank < n) {
+    int k = 4;
+    int max_iter = rank_bits + 2;
+    for (int iter = 0; iter < max_iter; iter++) {
+      sa_key_kernel<<<blocks, 256, 0, stream>>>(d_rank, d_sa_db.Current(),
+                                                d_keys_db.Current(), n, k,
+                                                rank_bits);
+
+      t_bytes = temp_storage_bytes;
+      cub::DeviceRadixSort::SortPairs(d_temp_storage, t_bytes, d_keys_db, d_sa_db,
+                                      n, 0, key_bits, stream);
+
+      sa_diff_kernel<<<blocks, 256, 0, stream>>>(d_keys_db.Current(), d_diff, n);
+
+      t_bytes = temp_storage_bytes;
+      cub::DeviceScan::InclusiveSum(d_temp_storage, t_bytes, d_diff,
+                                    d_unique_ranks, n, stream);
+
+      sa_rank_kernel<<<blocks, 256, 0, stream>>>(d_unique_ranks,
+                                                 d_sa_db.Current(), d_rank, n);
+
+      // Asynchronous transfer to pinned memory + stream synchronization
+      CUDA_CHECK(cudaMemcpyAsync(host_last_rank, d_unique_ranks + n - 1,
+                                 sizeof(int), cudaMemcpyDeviceToHost, stream));
+      CUDA_CHECK(cudaStreamSynchronize(stream));
+
+      if (*host_last_rank == n) {
+        break; // Early exit when Suffix Array is 100% sorted
+      }
+
+      k *= 2;
     }
-
-    k *= 2;
   }
 
   if (*host_last_rank < n) {
@@ -256,9 +281,8 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
 
   size_t zrle_smem = (size_t)threads_comp * 260;
   zrle_encode_kernel<<<z_blocks, threads_comp, zrle_smem, stream>>>(
-      d_bwt, d_out_symbols, d_chunk_sym_lens, n, mini_chunk_size, threads_comp);
-  compute_histogram_kernel<<<z_blocks, threads_comp, 0, stream>>>(
-      d_out_symbols, d_chunk_sym_lens, d_hist, num_chunks, mini_chunk_size);
+      d_bwt, d_out_symbols, d_chunk_sym_lens, d_hist, n, mini_chunk_size,
+      threads_comp);
   build_tans_all_kernel<<<1, 257, 0, stream>>>(
       d_hist, d_p, d_prefix_p, d_max_x, d_symbol_spread, d_enc_table,
       d_dec_table, d_dec_symbol, d_next_state, L, 257);
@@ -294,7 +318,7 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
       d_chunk_bit_lens, d_chunk_word_lens, num_chunks);
 
   CUDA_CHECK(cudaMemsetAsync(d_word_offsets, 0, sizeof(uint32_t), stream));
-  size_t t_bytes = temp_storage_bytes;
+  t_bytes = temp_storage_bytes;
   cub::DeviceScan::InclusiveSum(d_temp_storage, t_bytes, d_chunk_word_lens,
                                 d_word_offsets + 1, num_chunks, stream);
 

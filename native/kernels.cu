@@ -37,6 +37,31 @@ __global__ void fill_sequence_kernel(int *__restrict__ out, int n) {
     out[idx] = idx;
 }
 
+__global__ void sa_4byte_keys_kernel(const unsigned char *__restrict__ T,
+                                     uint32_t *__restrict__ keys,
+                                     int *__restrict__ sa, int n) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= n)
+    return;
+  uint32_t c0 = (uint32_t)T[idx];
+  uint32_t c1 = (uint32_t)T[(idx + 1) % n];
+  uint32_t c2 = (uint32_t)T[(idx + 2) % n];
+  uint32_t c3 = (uint32_t)T[(idx + 3) % n];
+  keys[idx] = (c0 << 24) | (c1 << 16) | (c2 << 8) | c3;
+  sa[idx] = idx;
+}
+
+__global__ void sa_diff_32_kernel(const uint32_t *__restrict__ sorted_keys,
+                                  int *__restrict__ diff, int n) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= n)
+    return;
+  if (idx == 0)
+    diff[idx] = 1;
+  else
+    diff[idx] = (sorted_keys[idx] != sorted_keys[idx - 1]) ? 1 : 0;
+}
+
 __global__ void sa_key_kernel(const int *__restrict__ rank,
                               int *__restrict__ sa, uint64_t *__restrict__ keys,
                               int n, int k, int rank_shift) {
@@ -86,73 +111,92 @@ __global__ void
 zrle_encode_kernel(const unsigned char *__restrict__ bwt,
                    unsigned short *__restrict__ out_symbols,
                    unsigned int *__restrict__ chunk_symbol_lengths,
+                   uint32_t *__restrict__ hist,
                    int total_size, int chunk_size, int threads_comp) {
+  __shared__ uint32_t s_block_hist[257];
+  for (int i = threadIdx.x; i < 257; i += blockDim.x) {
+    s_block_hist[i] = 0;
+  }
+  __syncthreads();
+
   int chunk_id = blockIdx.x * blockDim.x + threadIdx.x;
   int start = chunk_id * chunk_size;
-  if (start >= total_size)
-    return;
   int end = start + chunk_size;
   if (end > total_size)
     end = total_size;
 
-  extern __shared__ unsigned char s_alphabet[];
-  unsigned char *alphabet = &s_alphabet[threadIdx.x * 260];
-  for (int i = 0; i < 256; i++) {
-    alphabet[i] = (unsigned char)i;
-  }
-
-  int zero_run = 0, sym_offset = 0, out_base = chunk_id * chunk_size;
-  for (int i = start; i < end; i++) {
-    unsigned char c = bwt[i], idx = 0;
-    for (int j = 0; j < 256; j++) {
-      if (alphabet[j] == c) {
-        idx = (unsigned char)j;
-        break;
-      }
+  if (start < total_size) {
+    extern __shared__ unsigned char s_alphabet[];
+    unsigned char *alphabet = &s_alphabet[threadIdx.x * 260];
+    for (int i = 0; i < 256; i++) {
+      alphabet[i] = (unsigned char)i;
     }
 
-    if (idx == 0) {
-      zero_run++;
-    } else {
-      if (zero_run > 0) {
-        int temp = zero_run;
-        while (temp > 0) {
-          if (temp % 2 == 1) {
-            out_symbols[out_base + sym_offset++] = 0;
-            temp = (temp - 1) / 2;
-          } else {
-            out_symbols[out_base + sym_offset++] = 1;
-            temp = (temp - 2) / 2;
-          }
+    int zero_run = 0, sym_offset = 0, out_base = chunk_id * chunk_size;
+    for (int i = start; i < end; i++) {
+      unsigned char c = bwt[i], idx = 0;
+      for (int j = 0; j < 256; j++) {
+        if (alphabet[j] == c) {
+          idx = (unsigned char)j;
+          break;
         }
-        zero_run = 0;
       }
-      out_symbols[out_base + sym_offset++] = idx + 1;
-    }
 
-    // MTF-1 Adaptive Ranking: prevents thrashing on alternating 2-symbol runs
-    if (idx == 1) {
-      alphabet[1] = alphabet[0];
-      alphabet[0] = c;
-    } else if (idx > 1) {
-      for (int j = idx; j > 0; j--)
-        alphabet[j] = alphabet[j - 1];
-      alphabet[0] = c;
-    }
-  }
-  if (zero_run > 0) {
-    int temp = zero_run;
-    while (temp > 0) {
-      if (temp % 2 == 1) {
-        out_symbols[out_base + sym_offset++] = 0;
-        temp = (temp - 1) / 2;
+      if (idx == 0) {
+        zero_run++;
       } else {
-        out_symbols[out_base + sym_offset++] = 1;
-        temp = (temp - 2) / 2;
+        if (zero_run > 0) {
+          int temp = zero_run;
+          while (temp > 0) {
+            if (temp % 2 == 1) {
+              out_symbols[out_base + sym_offset++] = 0;
+              atomicAdd(&s_block_hist[0], 1);
+              temp = (temp - 1) / 2;
+            } else {
+              out_symbols[out_base + sym_offset++] = 1;
+              atomicAdd(&s_block_hist[1], 1);
+              temp = (temp - 2) / 2;
+            }
+          }
+          zero_run = 0;
+        }
+        out_symbols[out_base + sym_offset++] = idx + 1;
+        atomicAdd(&s_block_hist[idx + 1], 1);
+      }
+
+      // MTF-1 Adaptive Ranking: prevents thrashing on alternating 2-symbol runs
+      if (idx == 1) {
+        alphabet[1] = alphabet[0];
+        alphabet[0] = c;
+      } else if (idx > 1) {
+        for (int j = idx; j > 0; j--)
+          alphabet[j] = alphabet[j - 1];
+        alphabet[0] = c;
       }
     }
+    if (zero_run > 0) {
+      int temp = zero_run;
+      while (temp > 0) {
+        if (temp % 2 == 1) {
+          out_symbols[out_base + sym_offset++] = 0;
+          atomicAdd(&s_block_hist[0], 1);
+          temp = (temp - 1) / 2;
+        } else {
+          out_symbols[out_base + sym_offset++] = 1;
+          atomicAdd(&s_block_hist[1], 1);
+          temp = (temp - 2) / 2;
+        }
+      }
+    }
+    chunk_symbol_lengths[chunk_id] = sym_offset;
   }
-  chunk_symbol_lengths[chunk_id] = sym_offset;
+
+  __syncthreads();
+  for (int i = threadIdx.x; i < 257; i += blockDim.x) {
+    if (s_block_hist[i] > 0) {
+      atomicAdd(&hist[i], s_block_hist[i]);
+    }
+  }
 }
 
 __global__ void
