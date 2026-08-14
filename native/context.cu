@@ -254,7 +254,8 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
 
   CUDA_CHECK(cudaMemsetAsync(d_hist, 0, 257 * sizeof(uint32_t), stream));
 
-  zrle_encode_kernel<<<z_blocks, threads_comp, threads_comp * 260, stream>>>(
+  size_t zrle_smem = (size_t)threads_comp * 260;
+  zrle_encode_kernel<<<z_blocks, threads_comp, zrle_smem, stream>>>(
       d_bwt, d_out_symbols, d_chunk_sym_lens, n, mini_chunk_size, threads_comp);
   compute_histogram_kernel<<<z_blocks, threads_comp, 0, stream>>>(
       d_out_symbols, d_chunk_sym_lens, d_hist, num_chunks, mini_chunk_size);
@@ -597,8 +598,12 @@ bool DecompressionContext::decompress_chunk(int threads_decomp,
   if (is_raw == 1) {
     CUDA_CHECK(cudaMemcpyAsync(d_data, d_payload, comp_size,
                                cudaMemcpyDeviceToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(host_out, d_data, uncomp_size,
+                               cudaMemcpyDeviceToHost, stream));
   } else if (is_raw == 2) {
     CUDA_CHECK(cudaMemsetAsync(d_data, host_in[0], uncomp_size, stream));
+    CUDA_CHECK(cudaMemcpyAsync(host_out, d_data, uncomp_size,
+                               cudaMemcpyDeviceToHost, stream));
   } else {
     num_chunks = (uncomp_size + mini_chunk_size - 1) / mini_chunk_size;
 
@@ -639,8 +644,6 @@ bool DecompressionContext::decompress_chunk(int threads_decomp,
       }
 
       int blocks = (num_chunks + threads_decomp - 1) / threads_decomp;
-      // DYNAMIC SMEM SIZE: (2 * L * sizeof(int)) + (threads_decomp * 256 bytes)
-      // for alphabet
       size_t smem_size = (2 * L * sizeof(int)) + (size_t)threads_decomp * 256;
 
       if (smem_size > 49152) {
@@ -653,18 +656,13 @@ bool DecompressionContext::decompress_chunk(int threads_decomp,
           d_dense_words, d_word_offsets, d_chunk_bit_lengths, d_bwt,
           d_decoding_table, d_decoding_symbol, uncomp_size, mini_chunk_size, L);
     }
-  }
 
-  if (is_raw == 0) {
-    // Write scalars into pinned memory BEFORE graph launch reads them
     *host_uncomp_size = uncomp_size;
     *host_primary_idx = primary_idx;
 
     if (uncomp_size == macro_size && graph_exec) {
-      // CUDA GRAPH FAST PATH: Replay pre-captured inverse BWT graph
       CUDA_CHECK(cudaGraphLaunch(graph_exec, stream));
     } else {
-      // FALLBACK PATH: Inline launches for partial/last macro chunk
       CUDA_CHECK(cudaMemcpyAsync(d_sizes, host_uncomp_size, sizeof(int),
                                  cudaMemcpyHostToDevice, stream));
       CUDA_CHECK(cudaMemcpyAsync(d_primary_idx, host_primary_idx, sizeof(int),
@@ -708,10 +706,11 @@ bool DecompressionContext::decompress_chunk(int threads_decomp,
       jump_scatter_vec_kernel<<<grid_p, block_p, 0, stream>>>(
           curr_JD, d_bwt, d_data, d_primary_idx, d_offsets, d_sizes);
     }
+
+    CUDA_CHECK(cudaMemcpyAsync(host_out, d_data, uncomp_size,
+                               cudaMemcpyDeviceToHost, stream));
   }
 
-  CUDA_CHECK(cudaMemcpyAsync(host_out, d_data, uncomp_size,
-                             cudaMemcpyDeviceToHost, stream));
   CUDA_CHECK(cudaEventRecord(e_end, stream));
   return true;
 }

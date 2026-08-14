@@ -97,8 +97,9 @@ zrle_encode_kernel(const unsigned char *__restrict__ bwt,
 
   extern __shared__ unsigned char s_alphabet[];
   unsigned char *alphabet = &s_alphabet[threadIdx.x * 260];
-  for (int i = 0; i < 256; i++)
+  for (int i = 0; i < 256; i++) {
     alphabet[i] = (unsigned char)i;
+  }
 
   int zero_run = 0, sym_offset = 0, out_base = chunk_id * chunk_size;
   for (int i = start; i < end; i++) {
@@ -109,9 +110,6 @@ zrle_encode_kernel(const unsigned char *__restrict__ bwt,
         break;
       }
     }
-    for (int j = idx; j > 0; j--)
-      alphabet[j] = alphabet[j - 1];
-    alphabet[0] = c;
 
     if (idx == 0) {
       zero_run++;
@@ -130,6 +128,16 @@ zrle_encode_kernel(const unsigned char *__restrict__ bwt,
         zero_run = 0;
       }
       out_symbols[out_base + sym_offset++] = idx + 1;
+    }
+
+    // MTF-1 Adaptive Ranking: prevents thrashing on alternating 2-symbol runs
+    if (idx == 1) {
+      alphabet[1] = alphabet[0];
+      alphabet[0] = c;
+    } else if (idx > 1) {
+      for (int j = idx; j > 0; j--)
+        alphabet[j] = alphabet[j - 1];
+      alphabet[0] = c;
     }
   }
   if (zero_run > 0) {
@@ -401,12 +409,17 @@ __global__ void tabled_decode_kernel(
         power = 1;
       }
       if (out_idx < end) {
-        unsigned int mtf = s - 1;
-        unsigned char c = alphabet[mtf];
+        unsigned int idx = s - 1;
+        unsigned char c = alphabet[idx];
         bwt[out_idx++] = c;
-        for (int j = mtf; j > 0; j--)
-          alphabet[j] = alphabet[j - 1];
-        alphabet[0] = c;
+        if (idx == 1) {
+          alphabet[1] = alphabet[0];
+          alphabet[0] = c;
+        } else if (idx > 1) {
+          for (int j = idx; j > 0; j--)
+            alphabet[j] = alphabet[j - 1];
+          alphabet[0] = c;
+        }
       }
     }
   }
@@ -535,8 +548,9 @@ __global__ void jump_init_vec_kernel(const int *__restrict__ LF,
   if (lid >= size)
     return;
   uint64_t off = chunk_offsets[cid];
-  int gid = off + lid, prim = off + primary_indices[cid],
-      g_target = off + LF[gid];
+  int gid = off + lid, prim = off + primary_indices[cid];
+  int lf_val = LF[gid];
+  int g_target = off + ((lf_val >= 0 && lf_val < size) ? lf_val : 0);
   if (gid == prim) {
     JD[gid] = make_int2(gid, 0);
   } else {
@@ -549,12 +563,19 @@ __global__ void jump_step_vec_kernel(const int2 *__restrict__ JD_in,
                                      const uint64_t *__restrict__ offsets,
                                      const int *__restrict__ sizes) {
   int cid = blockIdx.y, lid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (lid >= sizes[cid])
+  int size = sizes[cid];
+  if (lid >= size)
     return;
-  int gid = offsets[cid] + lid;
+  uint64_t off = offsets[cid];
+  int gid = off + lid;
   int2 my_jd = JD_in[gid];
-  int2 target_jd = JD_in[my_jd.x];
-  JD_out[gid] = make_int2(target_jd.x, my_jd.y + target_jd.y);
+  int target_idx = my_jd.x;
+  if (target_idx >= (int)off && target_idx < (int)off + size) {
+    int2 target_jd = JD_in[target_idx];
+    JD_out[gid] = make_int2(target_jd.x, my_jd.y + target_jd.y);
+  } else {
+    JD_out[gid] = my_jd;
+  }
 }
 
 __global__ void jump_scatter_vec_kernel(const int2 *__restrict__ JD,
@@ -568,9 +589,12 @@ __global__ void jump_scatter_vec_kernel(const int2 *__restrict__ JD,
   if (lid >= size)
     return;
   uint64_t off = offsets[cid];
-  int gid = off + lid, prim = off + primary[cid],
-      d_forw = (gid == prim) ? 0 : (size - JD[gid].y);
-  out[off + size - 1 - d_forw] = bwt[gid];
+  int gid = off + lid, prim = off + primary[cid];
+  int d_forw = (gid == prim) ? 0 : (size - JD[gid].y);
+  int target_pos = (int)off + size - 1 - d_forw;
+  if (target_pos >= (int)off && target_pos < (int)off + size) {
+    out[target_pos] = bwt[gid];
+  }
 }
 
 __global__ void gpu_hash_kernel(const unsigned char *__restrict__ data,

@@ -96,17 +96,16 @@ public:
 
 class DecompressionContext {
 public:
-  int macro_size;
-  int mini_size;
-  int L;
+  int macro_size = 0;
+  int mini_size = 0;
+  int L = 0;
   int max_chunks;
   int max_words;
 
   cudaStream_t stream = nullptr;
-  cudaEvent_t e_start = nullptr, e_end = nullptr;
-
   cudaGraph_t graph = nullptr;
   cudaGraphExec_t graph_exec = nullptr;
+  cudaEvent_t e_start = nullptr, e_end = nullptr;
 
   unsigned char *host_in = nullptr;
   unsigned char *host_out = nullptr;
