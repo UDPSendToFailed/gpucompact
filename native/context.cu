@@ -211,12 +211,17 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
   sa_rank_kernel<<<blocks, 256, 0, stream>>>(d_unique_ranks,
                                              d_sa_db.Current(), d_rank, n);
 
-  CUDA_CHECK(cudaMemcpyAsync(host_last_rank, d_unique_ranks + n - 1,
-                             sizeof(int), cudaMemcpyDeviceToHost, stream));
-  CUDA_CHECK(cudaStreamSynchronize(stream));
+  bool sorted = false;
+  if (n <= 1024) {
+    CUDA_CHECK(cudaMemcpyAsync(host_last_rank, d_unique_ranks + n - 1,
+                               sizeof(int), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    if (*host_last_rank == n)
+      sorted = true;
+  }
 
   // If 4-byte prefixes are not unique, continue doubling from k = 4 (skips k=1, 2)
-  if (*host_last_rank < n) {
+  if (!sorted) {
     int k = 4;
     int max_iter = rank_bits + 2;
     for (int iter = 0; iter < max_iter; iter++) {
@@ -237,23 +242,28 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
       sa_rank_kernel<<<blocks, 256, 0, stream>>>(d_unique_ranks,
                                                  d_sa_db.Current(), d_rank, n);
 
-      // Asynchronous transfer to pinned memory + stream synchronization
-      CUDA_CHECK(cudaMemcpyAsync(host_last_rank, d_unique_ranks + n - 1,
-                                 sizeof(int), cudaMemcpyDeviceToHost, stream));
-      CUDA_CHECK(cudaStreamSynchronize(stream));
+      // Only synchronize and poll for early exit starting at round 3 (effective prefix >= 64 bytes)
+      // or on the final iteration, allowing the GPU to queue early rounds back-to-back without CPU stalls.
+      if (iter >= 3 || n <= 1024 || iter == max_iter - 1) {
+        CUDA_CHECK(cudaMemcpyAsync(host_last_rank, d_unique_ranks + n - 1,
+                                   sizeof(int), cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
 
-      if (*host_last_rank == n) {
-        break; // Early exit when Suffix Array is 100% sorted
+        if (*host_last_rank == n) {
+          sorted = true;
+          break; // Early exit when Suffix Array is 100% sorted
+        }
       }
 
       k *= 2;
     }
   }
 
-  if (*host_last_rank < n) {
+  if (!sorted) {
     // Input is strictly periodic (period P < n), so suffix ranks cannot be
     // unique. Inverse BWT pointer jumping requires a single cycle of length n,
     // so fall back to raw mode.
+
     is_raw = 1;
     comp_size = n;
     std::memcpy(host_out, host_in, n);
