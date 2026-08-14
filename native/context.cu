@@ -186,8 +186,10 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
   int blocks = (n + 255) / 256;
   cast_uint8_to_int32_kernel<<<blocks, 256, 0, stream>>>(d_data, d_rank, n);
 
+  int rank_bits = (int)std::ceil(std::log2((double)n));
+  int key_bits = std::min(64, rank_bits * 2);
   int k = 1;
-  int max_iter = (int)std::ceil(std::log2(n)) + 2;
+  int max_iter = rank_bits + 2;
 
   cub::DoubleBuffer<uint64_t> d_keys_db(d_keys, d_keys_alt);
   cub::DoubleBuffer<int> d_sa_db(d_sa, d_sa_alt);
@@ -195,11 +197,12 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
   // ASYNC SA DOUBLING WITH PINNED MEMORY EARLY EXIT CHECK
   for (int iter = 0; iter < max_iter; iter++) {
     sa_key_kernel<<<blocks, 256, 0, stream>>>(d_rank, d_sa_db.Current(),
-                                              d_keys_db.Current(), n, k);
+                                              d_keys_db.Current(), n, k,
+                                              rank_bits);
 
     size_t t_bytes = temp_storage_bytes;
     cub::DeviceRadixSort::SortPairs(d_temp_storage, t_bytes, d_keys_db, d_sa_db,
-                                    n, 0, 64, stream);
+                                    n, 0, key_bits, stream);
 
     sa_diff_kernel<<<blocks, 256, 0, stream>>>(d_keys_db.Current(), d_diff, n);
 
@@ -473,16 +476,19 @@ DecompressionContext::DecompressionContext(int macro_bytes, int mini_bytes,
     CUDA_CHECK(cudaMemcpyAsync(d_primary_idx, host_primary_idx, sizeof(int),
                                cudaMemcpyHostToDevice, stream));
 
+    int rank_bits = (int)std::ceil(std::log2((double)macro_size));
+    int key_bits = std::min(64, 8 + rank_bits);
+
     dim3 grid_k(blocks_u, 1);
     fill_key_kernel<<<grid_k, 256, 0, stream>>>(d_offsets, d_sizes, d_bwt,
-                                                d_keys, 1);
+                                                d_keys, 1, rank_bits);
     fill_sequence_kernel<<<blocks_u, 256, 0, stream>>>(d_J_in, macro_size);
 
     cub::DoubleBuffer<uint64_t> keys_db(d_keys, d_keys_alt);
     cub::DoubleBuffer<int> f_to_l_db(d_J_in, d_J_out);
     size_t t_bytes = temp_storage_bytes;
     cub::DeviceRadixSort::SortPairs(d_temp_storage, t_bytes, keys_db, f_to_l_db,
-                                    macro_size, 0, 64, stream);
+                                    macro_size, 0, key_bits, stream);
 
     build_lf_kernel<<<blocks_u, 256, 0, stream>>>(f_to_l_db.Current(),
                                                   d_global_LF, macro_size);
@@ -666,18 +672,20 @@ bool DecompressionContext::decompress_chunk(int threads_decomp,
       CUDA_CHECK(cudaMemcpyAsync(d_primary_idx, host_primary_idx, sizeof(int),
                                  cudaMemcpyHostToDevice, stream));
 
+      int rank_bits = (int)std::ceil(std::log2((double)uncomp_size));
+      int key_bits = std::min(64, 8 + rank_bits);
       int blocks_u = (uncomp_size + 255) / 256;
 
       dim3 grid_k(blocks_u, 1);
       fill_key_kernel<<<grid_k, 256, 0, stream>>>(d_offsets, d_sizes, d_bwt,
-                                                  d_keys, 1);
+                                                  d_keys, 1, rank_bits);
       fill_sequence_kernel<<<blocks_u, 256, 0, stream>>>(d_J_in, uncomp_size);
 
       cub::DoubleBuffer<uint64_t> keys_db(d_keys, d_keys_alt);
       cub::DoubleBuffer<int> f_to_l_db(d_J_in, d_J_out);
       size_t t_bytes = temp_storage_bytes;
       cub::DeviceRadixSort::SortPairs(d_temp_storage, t_bytes, keys_db,
-                                      f_to_l_db, uncomp_size, 0, 64, stream);
+                                      f_to_l_db, uncomp_size, 0, key_bits, stream);
 
       build_lf_kernel<<<blocks_u, 256, 0, stream>>>(f_to_l_db.Current(),
                                                     d_global_LF, uncomp_size);

@@ -24,14 +24,14 @@
 TimingStats build_archive_explicit(
     const std::vector<std::pair<std::string, std::string>> &files_to_pack,
     const std::string &output_path, const LaunchConfig &config,
-    CompressionContext *external_ctx = nullptr, bool quiet = false,
-    ProgressCallback progress_cb = nullptr);
+    std::vector<CompressionContext *> *external_contexts = nullptr,
+    bool quiet = false, ProgressCallback progress_cb = nullptr);
 
-TimingStats build_archive(const std::vector<std::string> &input_paths,
-                          const std::string &output_path,
-                          const LaunchConfig &config,
-                          CompressionContext *ctx = nullptr, bool quiet = false,
-                          ProgressCallback progress_cb = nullptr);
+TimingStats build_archive(
+    const std::vector<std::string> &input_paths,
+    const std::string &output_path, const LaunchConfig &config,
+    std::vector<CompressionContext *> *external_contexts = nullptr,
+    bool quiet = false, ProgressCallback progress_cb = nullptr);
 
 void append_to_archive(const std::string &archive_path,
                        const std::vector<std::string> &input_paths,

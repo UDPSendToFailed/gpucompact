@@ -39,13 +39,13 @@ __global__ void fill_sequence_kernel(int *__restrict__ out, int n) {
 
 __global__ void sa_key_kernel(const int *__restrict__ rank,
                               int *__restrict__ sa, uint64_t *__restrict__ keys,
-                              int n, int k) {
+                              int n, int k, int rank_shift) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= n)
     return;
-  uint64_t r1 = rank[idx];
-  uint64_t r2 = rank[(idx + k) % n];
-  keys[idx] = (r1 << 32) | r2;
+  uint64_t r1 = (uint32_t)rank[idx];
+  uint64_t r2 = (uint32_t)rank[(idx + k) % n];
+  keys[idx] = (r1 << rank_shift) | r2;
   sa[idx] = idx;
 }
 
@@ -451,7 +451,8 @@ __global__ void dense_pack_kernel(const uint64_t *__restrict__ in,
 __global__ void fill_key_kernel(const uint64_t *__restrict__ offsets,
                                 const int *__restrict__ sizes,
                                 const unsigned char *__restrict__ bwt,
-                                uint64_t *__restrict__ key, int num_chunks) {
+                                uint64_t *__restrict__ key, int num_chunks,
+                                int rank_shift) {
   int cid = blockIdx.y;
   if (cid >= num_chunks)
     return;
@@ -462,8 +463,7 @@ __global__ void fill_key_kernel(const uint64_t *__restrict__ offsets,
     return;
 
   uint64_t off = offsets[cid];
-  key[off + lid] = (((uint64_t)cid) << 48) |
-                   (((uint64_t)bwt[off + lid]) << 32) | (uint64_t)lid;
+  key[off + lid] = (((uint64_t)bwt[off + lid]) << rank_shift) | (uint64_t)lid;
 }
 
 __global__ void build_lf_kernel(const int *__restrict__ F_to_L,

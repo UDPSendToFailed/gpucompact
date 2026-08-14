@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -28,12 +29,63 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <mutex>
+#include <queue>
 #include <set>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+template <typename T> class WorkQueue {
+private:
+  std::queue<T> queue_;
+  std::mutex mutex_;
+  std::condition_variable cv_push_;
+  std::condition_variable cv_pop_;
+  size_t capacity_;
+  bool shutdown_ = false;
+
+public:
+  WorkQueue(size_t capacity) : capacity_(capacity) {}
+
+  void cancel() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    shutdown_ = true;
+    cv_push_.notify_all();
+    cv_pop_.notify_all();
+  }
+
+  bool push(T item) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_push_.wait(lock,
+                  [this] { return queue_.size() < capacity_ || shutdown_; });
+    if (shutdown_)
+      return false;
+    queue_.push(item);
+    cv_pop_.notify_one();
+    return true;
+  }
+
+  bool pop(T &item) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_pop_.wait(lock, [this] { return !queue_.empty() || shutdown_; });
+    if (queue_.empty() || shutdown_)
+      return false;
+    item = queue_.front();
+    queue_.pop();
+    cv_push_.notify_one();
+    return true;
+  }
+};
+
+struct WriterChunkItem {
+  CompressionContext *ctx = nullptr;
+  uint32_t chunk_idx = 0;
+  uint64_t chunk_len = 0;
+  bool is_eof = false;
+};
 
 inline FileEntry get_file_entry(const char *blob, size_t index) {
   FileEntry fe;
@@ -170,17 +222,23 @@ build_chunk_slices(const std::vector<FileWorkItem> &items, uint32_t chunk_idx,
 TimingStats build_archive_explicit(
     const std::vector<std::pair<std::string, std::string>> &files_to_pack,
     const std::string &output_path, const LaunchConfig &config,
-    CompressionContext *external_ctx, bool quiet,
+    std::vector<CompressionContext *> *external_contexts, bool quiet,
     ProgressCallback progress_cb) {
   auto t_start = std::chrono::high_resolution_clock::now();
   float gpu_ms = 0.0f;
 
-  std::unique_ptr<CompressionContext> own_ctx;
-  CompressionContext *ctx = external_ctx;
-  if (!ctx) {
-    own_ctx = std::make_unique<CompressionContext>(
-        config.macro_mb * 1024 * 1024, config.mini_size, config.L);
-    ctx = own_ctx.get();
+  std::vector<std::unique_ptr<CompressionContext>> own_contexts_storage;
+  std::vector<CompressionContext *> contexts;
+
+  if (external_contexts && !external_contexts->empty()) {
+    contexts = *external_contexts;
+  } else {
+    for (int i = 0; i < 3; i++) {
+      auto ctx = std::make_unique<CompressionContext>(
+          config.macro_mb * 1024 * 1024, config.mini_size, config.L);
+      contexts.push_back(ctx.get());
+      own_contexts_storage.push_back(std::move(ctx));
+    }
   }
 
   size_t macro_bytes = config.macro_mb * 1024 * 1024;
@@ -268,41 +326,76 @@ TimingStats build_archive_explicit(
   std::vector<ChunkEntry> chunk_entries;
   chunk_entries.reserve(total_chunks);
 
-  uint8_t *staging_buf[2] = {nullptr, nullptr};
-  cudaMallocHost(&staging_buf[0], macro_bytes);
-  cudaMallocHost(&staging_buf[1], macro_bytes);
+  WorkQueue<CompressionContext *> empty_q(contexts.size());
+  WorkQueue<WriterChunkItem> compute_q(contexts.size());
+  WorkQueue<WriterChunkItem> write_q(contexts.size());
+
+  for (auto *ctx : contexts)
+    empty_q.push(ctx);
+
+  std::thread reader([&]() {
+    try {
+      size_t start_hint = 0;
+      for (uint32_t c = 0; c < total_chunks; c++) {
+        CompressionContext *ctx = nullptr;
+        if (!empty_q.pop(ctx) || !ctx)
+          break;
+
+        uint64_t chunk_len =
+            std::min((uint64_t)macro_bytes,
+                     total_uncomp_bytes - ((uint64_t)c * macro_bytes));
+
+        auto slices = build_chunk_slices(items, c, macro_bytes,
+                                         total_uncomp_bytes, start_hint);
+        read_chunk_files_parallel(slices, ctx->host_in, worker_threads);
+
+        ctx->bytes_read = (int)chunk_len;
+
+        WriterChunkItem item;
+        item.ctx = ctx;
+        item.chunk_idx = c;
+        item.chunk_len = chunk_len;
+        item.is_eof = false;
+
+        if (!compute_q.push(item))
+          break;
+      }
+      WriterChunkItem eof_item;
+      eof_item.is_eof = true;
+      compute_q.push(eof_item);
+    } catch (...) {
+      empty_q.cancel();
+      compute_q.cancel();
+      write_q.cancel();
+    }
+  });
+
+  std::thread compute([&]() {
+    while (true) {
+      WriterChunkItem item;
+      if (!compute_q.pop(item) || item.is_eof) {
+        WriterChunkItem eof_item;
+        eof_item.is_eof = true;
+        write_q.push(eof_item);
+        break;
+      }
+
+      item.ctx->compress_chunk(config.threads_comp, config.mini_size);
+
+      if (!write_q.push(item))
+        break;
+    }
+  });
 
   uint64_t bytes_processed = 0, bytes_compressed = 0;
-  size_t start_hint_0 = 0, start_hint_1 = 0;
 
-  auto slices_curr = build_chunk_slices(items, 0, macro_bytes,
-                                        total_uncomp_bytes, start_hint_0);
-  read_chunk_files_parallel(slices_curr, staging_buf[0], worker_threads);
+  while (true) {
+    WriterChunkItem item;
+    if (!write_q.pop(item) || item.is_eof)
+      break;
 
-  start_hint_1 = start_hint_0;
-
-  for (uint32_t c = 0; c < total_chunks; ++c) {
-    uint32_t active_idx = c % 2;
-    uint32_t next_idx = (c + 1) % 2;
-
-    uint64_t chunk_len =
-        std::min((uint64_t)macro_bytes,
-                 total_uncomp_bytes - ((uint64_t)c * macro_bytes));
-
-    std::future<void> next_fetch_future;
-    if (c + 1 < total_chunks) {
-      auto slices_next = build_chunk_slices(items, c + 1, macro_bytes,
-                                            total_uncomp_bytes, start_hint_1);
-      next_fetch_future = std::async(
-          std::launch::async,
-          [slices_next, buf = staging_buf[next_idx], worker_threads]() {
-            read_chunk_files_parallel(slices_next, buf, worker_threads);
-          });
-    }
-
-    ctx->bytes_read = (int)chunk_len;
-    std::memcpy(ctx->host_in, staging_buf[active_idx], chunk_len);
-    ctx->compress_chunk(config.threads_comp, config.mini_size);
+    CompressionContext *ctx = item.ctx;
+    cudaStreamSynchronize(ctx->stream);
 
     float ms = 0.0f;
     cudaEventElapsedTime(&ms, ctx->e_start, ctx->e_end);
@@ -314,14 +407,14 @@ TimingStats build_archive_explicit(
     ChunkEntry ce;
     ce.payload_offset = chunk_start;
     ce.comp_size = ctx->comp_size;
-    ce.uncomp_size = (uint32_t)chunk_len;
+    ce.uncomp_size = (uint32_t)item.chunk_len;
     ce.primary_idx = ctx->primary_idx;
     ce.is_raw = (uint8_t)ctx->is_raw;
     ce.reserved[0] = ce.reserved[1] = ce.reserved[2] = 0;
     ce.gpu_hash = ctx->gpu_hash;
     chunk_entries.push_back(ce);
 
-    bytes_processed += chunk_len;
+    bytes_processed += item.chunk_len;
     bytes_compressed += ctx->comp_size;
 
     if (progress_cb) {
@@ -338,13 +431,13 @@ TimingStats build_archive_explicit(
               .count());
     }
 
-    if (next_fetch_future.valid()) {
-      next_fetch_future.wait();
-    }
+    empty_q.push(ctx);
   }
 
-  cudaFreeHost(staging_buf[0]);
-  cudaFreeHost(staging_buf[1]);
+  if (reader.joinable())
+    reader.join();
+  if (compute.joinable())
+    compute.join();
 
   uint64_t gtoc_offset = fout.tellp();
   fout.write(string_table.data(), string_table.size());
@@ -378,8 +471,8 @@ TimingStats build_archive_explicit(
 TimingStats build_archive(const std::vector<std::string> &input_paths,
                           const std::string &output_path,
                           const LaunchConfig &config,
-                          CompressionContext *external_ctx, bool quiet,
-                          ProgressCallback progress_cb) {
+                          std::vector<CompressionContext *> *external_contexts,
+                          bool quiet, ProgressCallback progress_cb) {
   std::vector<std::pair<std::string, std::string>> files_to_pack;
   for (const auto &t_str : input_paths) {
     fs::path t = utf8_to_path(t_str);
@@ -409,7 +502,7 @@ TimingStats build_archive(const std::vector<std::string> &input_paths,
   }
 
   return build_archive_explicit(files_to_pack, output_path, config,
-                                external_ctx, quiet, progress_cb);
+                                external_contexts, quiet, progress_cb);
 }
 
 void remove_from_archive(const std::string &archive_path,

@@ -63,7 +63,7 @@ __global__ void fill_sequence_kernel(int *__restrict__ out, int n);
 // -------------------------------------------------------------------------
 __global__ void sa_key_kernel(const int *__restrict__ rank,
                               int *__restrict__ sa, uint64_t *__restrict__ keys,
-                              int n, int k);
+                              int n, int k, int rank_shift);
 
 __global__ void sa_diff_kernel(const uint64_t *__restrict__ sorted_keys,
                                int *__restrict__ diff, int n);
@@ -119,7 +119,8 @@ __global__ void dense_pack_kernel(const uint64_t *__restrict__ in,
 __global__ void fill_key_kernel(const uint64_t *__restrict__ offsets,
                                 const int *__restrict__ sizes,
                                 const unsigned char *__restrict__ bwt,
-                                uint64_t *__restrict__ key, int num_chunks);
+                                uint64_t *__restrict__ key, int num_chunks,
+                                int rank_shift);
 
 __global__ void build_lf_kernel(const int *__restrict__ F_to_L,
                                 int *__restrict__ LF, int n);

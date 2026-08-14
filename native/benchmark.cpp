@@ -87,8 +87,11 @@ void run_benchmark_stream(const std::vector<std::string> &input_paths,
   if (files.empty())
     return;
 
-  CompressionContext comp_ctx(config.macro_mb * 1024 * 1024, config.mini_size,
-                              config.L);
+  std::vector<CompressionContext *> comp_contexts;
+  for (int i = 0; i < 3; i++) {
+    comp_contexts.push_back(new CompressionContext(
+        config.macro_mb * 1024 * 1024, config.mini_size, config.L));
+  }
   std::vector<DecompressionContext *> decomp_contexts;
   for (int i = 0; i < 3; i++) {
     decomp_contexts.push_back(new DecompressionContext(
@@ -98,21 +101,21 @@ void run_benchmark_stream(const std::vector<std::string> &input_paths,
   // Pre-benchmark CUDA Warmup: Initialize driver, stream state & CUB kernels
   int dummy_n = std::min(1024 * 1024, config.macro_mb * 1024 * 1024);
   for (int i = 0; i < dummy_n; i++)
-    comp_ctx.host_in[i] = (unsigned char)(i % 255);
-  comp_ctx.bytes_read = dummy_n;
-  comp_ctx.compress_chunk(config.threads_comp, config.mini_size);
+    comp_contexts[0]->host_in[i] = (unsigned char)(i % 255);
+  comp_contexts[0]->bytes_read = dummy_n;
+  comp_contexts[0]->compress_chunk(config.threads_comp, config.mini_size);
   cudaDeviceSynchronize();
 
   decomp_contexts[0]->uncomp_size = dummy_n;
-  decomp_contexts[0]->comp_size = comp_ctx.comp_size;
-  decomp_contexts[0]->is_raw = comp_ctx.is_raw;
-  decomp_contexts[0]->primary_idx = comp_ctx.primary_idx;
-  decomp_contexts[0]->num_chunks = comp_ctx.num_chunks;
-  decomp_contexts[0]->total_words = comp_ctx.total_words;
-  decomp_contexts[0]->gpu_hash = comp_ctx.gpu_hash;
+  decomp_contexts[0]->comp_size = comp_contexts[0]->comp_size;
+  decomp_contexts[0]->is_raw = comp_contexts[0]->is_raw;
+  decomp_contexts[0]->primary_idx = comp_contexts[0]->primary_idx;
+  decomp_contexts[0]->num_chunks = comp_contexts[0]->num_chunks;
+  decomp_contexts[0]->total_words = comp_contexts[0]->total_words;
+  decomp_contexts[0]->gpu_hash = comp_contexts[0]->gpu_hash;
 
-  std::memcpy(decomp_contexts[0]->host_in, comp_ctx.host_out,
-              comp_ctx.comp_size);
+  std::memcpy(decomp_contexts[0]->host_in, comp_contexts[0]->host_out,
+              comp_contexts[0]->comp_size);
   decomp_contexts[0]->decompress_chunk(config.threads_decomp, config.mini_size);
   cudaDeviceSynchronize();
 
@@ -127,7 +130,7 @@ void run_benchmark_stream(const std::vector<std::string> &input_paths,
 
     try {
       TimingStats c_stats =
-          build_archive({file_path}, temp_out, config, &comp_ctx, true);
+          build_archive({file_path}, temp_out, config, &comp_contexts, true);
       uint64_t comp_size = fs::file_size(temp_out);
 
       TimingStats d_stats = extract_archive(temp_out, temp_dec, config,
@@ -187,6 +190,8 @@ void run_benchmark_stream(const std::vector<std::string> &input_paths,
     safe_remove_directory(temp_dec);
   }
 
+  for (auto *ctx : comp_contexts)
+    delete ctx;
   for (auto *ctx : decomp_contexts)
     delete ctx;
 }
