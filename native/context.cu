@@ -401,10 +401,8 @@ DecompressionContext::DecompressionContext(int macro_bytes, int mini_bytes,
   CUDA_CHECK(cudaMalloc(&d_primary_idx, sizeof(int)));
 
   CUDA_CHECK(cudaMalloc(&d_global_LF, macro_size * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&d_J_in, macro_size * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&d_D_in, macro_size * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&d_J_out, macro_size * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&d_D_out, macro_size * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_JD_in, macro_size * sizeof(int2)));
+  CUDA_CHECK(cudaMalloc(&d_JD_out, macro_size * sizeof(int2)));
 
   CUDA_CHECK(cudaMalloc(&d_chunk_bit_lengths, max_chunks * sizeof(uint32_t)));
   CUDA_CHECK(cudaMalloc(&d_chunk_word_lens, max_chunks * sizeof(uint32_t)));
@@ -426,7 +424,8 @@ DecompressionContext::DecompressionContext(int macro_bytes, int mini_bytes,
 
   size_t sort_bytes = 0, scan_bytes = 0;
   cub::DoubleBuffer<uint64_t> d_keys_db(d_keys, d_keys_alt);
-  cub::DoubleBuffer<int> d_sa_db(d_J_in, d_J_out);
+  cub::DoubleBuffer<int> d_sa_db(reinterpret_cast<int *>(d_JD_in),
+                                 reinterpret_cast<int *>(d_JD_out));
   cub::DeviceRadixSort::SortPairs(nullptr, sort_bytes, d_keys_db, d_sa_db,
                                   macro_size, 0, 64, stream);
   cub::DeviceScan::InclusiveSum(nullptr, scan_bytes, d_chunk_word_lens,
@@ -482,10 +481,12 @@ DecompressionContext::DecompressionContext(int macro_bytes, int mini_bytes,
     dim3 grid_k(blocks_u, 1);
     fill_key_kernel<<<grid_k, 256, 0, stream>>>(d_offsets, d_sizes, d_bwt,
                                                 d_keys, 1, rank_bits);
-    fill_sequence_kernel<<<blocks_u, 256, 0, stream>>>(d_J_in, macro_size);
+    fill_sequence_kernel<<<blocks_u, 256, 0, stream>>>(
+        reinterpret_cast<int *>(d_JD_in), macro_size);
 
     cub::DoubleBuffer<uint64_t> keys_db(d_keys, d_keys_alt);
-    cub::DoubleBuffer<int> f_to_l_db(d_J_in, d_J_out);
+    cub::DoubleBuffer<int> f_to_l_db(reinterpret_cast<int *>(d_JD_in),
+                                     reinterpret_cast<int *>(d_JD_out));
     size_t t_bytes = temp_storage_bytes;
     cub::DeviceRadixSort::SortPairs(d_temp_storage, t_bytes, keys_db, f_to_l_db,
                                     macro_size, 0, key_bits, stream);
@@ -495,20 +496,19 @@ DecompressionContext::DecompressionContext(int macro_bytes, int mini_bytes,
 
     dim3 grid_p(blocks_u, 1);
     dim3 block_p(256, 1);
-    jump_init_kernel<<<grid_p, block_p, 0, stream>>>(
-        d_global_LF, d_primary_idx, d_offsets, d_sizes, d_J_in, d_D_in);
+    jump_init_vec_kernel<<<grid_p, block_p, 0, stream>>>(
+        d_global_LF, d_primary_idx, d_offsets, d_sizes, d_JD_in);
 
-    int *curr_J = d_J_in, *curr_D = d_D_in;
-    int *next_J = d_J_out, *next_D = d_D_out;
+    int2 *curr_JD = d_JD_in;
+    int2 *next_JD = d_JD_out;
     for (int s = 0; s < steps; s++) {
-      jump_step_kernel<<<grid_p, block_p, 0, stream>>>(
-          curr_J, curr_D, next_J, next_D, d_offsets, d_sizes);
-      std::swap(curr_J, next_J);
-      std::swap(curr_D, next_D);
+      jump_step_vec_kernel<<<grid_p, block_p, 0, stream>>>(
+          curr_JD, next_JD, d_offsets, d_sizes);
+      std::swap(curr_JD, next_JD);
     }
 
-    jump_scatter_kernel<<<grid_p, block_p, 0, stream>>>(
-        curr_D, d_bwt, d_data, d_primary_idx, d_offsets, d_sizes);
+    jump_scatter_vec_kernel<<<grid_p, block_p, 0, stream>>>(
+        curr_JD, d_bwt, d_data, d_primary_idx, d_offsets, d_sizes);
 
     CUDA_CHECK(cudaStreamEndCapture(stream, &graph));
 #if CUDART_VERSION >= 11040
@@ -558,10 +558,8 @@ DecompressionContext::~DecompressionContext() {
   cudaFree(d_keys_alt);
   cudaFree(d_primary_idx);
   cudaFree(d_global_LF);
-  cudaFree(d_J_in);
-  cudaFree(d_D_in);
-  cudaFree(d_J_out);
-  cudaFree(d_D_out);
+  cudaFree(d_JD_in);
+  cudaFree(d_JD_out);
   cudaFree(d_chunk_bit_lengths);
   cudaFree(d_chunk_word_lens);
   cudaFree(d_decoding_table);
@@ -679,10 +677,12 @@ bool DecompressionContext::decompress_chunk(int threads_decomp,
       dim3 grid_k(blocks_u, 1);
       fill_key_kernel<<<grid_k, 256, 0, stream>>>(d_offsets, d_sizes, d_bwt,
                                                   d_keys, 1, rank_bits);
-      fill_sequence_kernel<<<blocks_u, 256, 0, stream>>>(d_J_in, uncomp_size);
+      fill_sequence_kernel<<<blocks_u, 256, 0, stream>>>(
+          reinterpret_cast<int *>(d_JD_in), uncomp_size);
 
       cub::DoubleBuffer<uint64_t> keys_db(d_keys, d_keys_alt);
-      cub::DoubleBuffer<int> f_to_l_db(d_J_in, d_J_out);
+      cub::DoubleBuffer<int> f_to_l_db(reinterpret_cast<int *>(d_JD_in),
+                                       reinterpret_cast<int *>(d_JD_out));
       size_t t_bytes = temp_storage_bytes;
       cub::DeviceRadixSort::SortPairs(d_temp_storage, t_bytes, keys_db,
                                       f_to_l_db, uncomp_size, 0, key_bits, stream);
@@ -692,22 +692,21 @@ bool DecompressionContext::decompress_chunk(int threads_decomp,
 
       dim3 grid_p(blocks_u, 1);
       dim3 block_p(256, 1);
-      jump_init_kernel<<<grid_p, block_p, 0, stream>>>(
-          d_global_LF, d_primary_idx, d_offsets, d_sizes, d_J_in, d_D_in);
+      jump_init_vec_kernel<<<grid_p, block_p, 0, stream>>>(
+          d_global_LF, d_primary_idx, d_offsets, d_sizes, d_JD_in);
 
-      int *curr_J = d_J_in, *curr_D = d_D_in;
-      int *next_J = d_J_out, *next_D = d_D_out;
+      int2 *curr_JD = d_JD_in;
+      int2 *next_JD = d_JD_out;
       int steps = (int)std::ceil(std::log2(uncomp_size));
 
       for (int s = 0; s < steps; s++) {
-        jump_step_kernel<<<grid_p, block_p, 0, stream>>>(
-            curr_J, curr_D, next_J, next_D, d_offsets, d_sizes);
-        std::swap(curr_J, next_J);
-        std::swap(curr_D, next_D);
+        jump_step_vec_kernel<<<grid_p, block_p, 0, stream>>>(
+            curr_JD, next_JD, d_offsets, d_sizes);
+        std::swap(curr_JD, next_JD);
       }
 
-      jump_scatter_kernel<<<grid_p, block_p, 0, stream>>>(
-          curr_D, d_bwt, d_data, d_primary_idx, d_offsets, d_sizes);
+      jump_scatter_vec_kernel<<<grid_p, block_p, 0, stream>>>(
+          curr_JD, d_bwt, d_data, d_primary_idx, d_offsets, d_sizes);
     }
   }
 

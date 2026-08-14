@@ -145,6 +145,24 @@ __global__ void jump_scatter_kernel(const int *__restrict__ D,
                                     const uint64_t *__restrict__ offsets,
                                     const int *__restrict__ sizes);
 
+__global__ void jump_init_vec_kernel(const int *__restrict__ LF,
+                                     const int *__restrict__ primary_indices,
+                                     const uint64_t *__restrict__ chunk_offsets,
+                                     const int *__restrict__ chunk_sizes,
+                                     int2 *__restrict__ JD);
+
+__global__ void jump_step_vec_kernel(const int2 *__restrict__ JD_in,
+                                     int2 *__restrict__ JD_out,
+                                     const uint64_t *__restrict__ offsets,
+                                     const int *__restrict__ sizes);
+
+__global__ void jump_scatter_vec_kernel(const int2 *__restrict__ JD,
+                                        const unsigned char *__restrict__ bwt,
+                                        unsigned char *__restrict__ out,
+                                        const int *__restrict__ primary,
+                                        const uint64_t *__restrict__ offsets,
+                                        const int *__restrict__ sizes);
+
 __global__ void gpu_hash_kernel(const unsigned char *__restrict__ data,
                                 unsigned long long *__restrict__ d_hash,
                                 int size);

@@ -123,10 +123,8 @@ public:
   int *d_primary_idx = nullptr;
 
   int *d_global_LF = nullptr;
-  int *d_J_in = nullptr;
-  int *d_D_in = nullptr;
-  int *d_J_out = nullptr;
-  int *d_D_out = nullptr;
+  int2 *d_JD_in = nullptr;
+  int2 *d_JD_out = nullptr;
 
   uint32_t *d_chunk_bit_lengths = nullptr;
   uint32_t *d_chunk_word_lens = nullptr;

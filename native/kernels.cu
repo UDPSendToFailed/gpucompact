@@ -525,6 +525,54 @@ __global__ void jump_scatter_kernel(const int *__restrict__ D,
   out[off + size - 1 - d_forw] = bwt[gid];
 }
 
+__global__ void jump_init_vec_kernel(const int *__restrict__ LF,
+                                     const int *__restrict__ primary_indices,
+                                     const uint64_t *__restrict__ chunk_offsets,
+                                     const int *__restrict__ chunk_sizes,
+                                     int2 *__restrict__ JD) {
+  int cid = blockIdx.y, lid = blockIdx.x * blockDim.x + threadIdx.x,
+      size = chunk_sizes[cid];
+  if (lid >= size)
+    return;
+  uint64_t off = chunk_offsets[cid];
+  int gid = off + lid, prim = off + primary_indices[cid],
+      g_target = off + LF[gid];
+  if (gid == prim) {
+    JD[gid] = make_int2(gid, 0);
+  } else {
+    JD[gid] = make_int2(g_target, 1);
+  }
+}
+
+__global__ void jump_step_vec_kernel(const int2 *__restrict__ JD_in,
+                                     int2 *__restrict__ JD_out,
+                                     const uint64_t *__restrict__ offsets,
+                                     const int *__restrict__ sizes) {
+  int cid = blockIdx.y, lid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (lid >= sizes[cid])
+    return;
+  int gid = offsets[cid] + lid;
+  int2 my_jd = JD_in[gid];
+  int2 target_jd = JD_in[my_jd.x];
+  JD_out[gid] = make_int2(target_jd.x, my_jd.y + target_jd.y);
+}
+
+__global__ void jump_scatter_vec_kernel(const int2 *__restrict__ JD,
+                                        const unsigned char *__restrict__ bwt,
+                                        unsigned char *__restrict__ out,
+                                        const int *__restrict__ primary,
+                                        const uint64_t *__restrict__ offsets,
+                                        const int *__restrict__ sizes) {
+  int cid = blockIdx.y, lid = blockIdx.x * blockDim.x + threadIdx.x,
+      size = sizes[cid];
+  if (lid >= size)
+    return;
+  uint64_t off = offsets[cid];
+  int gid = off + lid, prim = off + primary[cid],
+      d_forw = (gid == prim) ? 0 : (size - JD[gid].y);
+  out[off + size - 1 - d_forw] = bwt[gid];
+}
+
 __global__ void gpu_hash_kernel(const unsigned char *__restrict__ data,
                                 uint64_t *__restrict__ d_hash, int size) {
   int tid = threadIdx.x;
