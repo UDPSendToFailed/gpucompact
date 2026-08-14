@@ -13,6 +13,7 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 import os
 import sys
 import shutil
@@ -33,9 +34,9 @@ TEMP_DIR = Path("./temp_test_run").resolve()
 DATA_DIR = (TEMP_DIR / "source_data").resolve()
 
 def print_header(text):
-    print(f"\n{BOLD}{CYAN}{'='*70}{RESET}")
+    print(f"\n{BOLD}{CYAN}{'='*75}{RESET}")
     print(f"{BOLD}{CYAN}  {text}{RESET}")
-    print(f"{BOLD}{CYAN}{'='*70}{RESET}")
+    print(f"{BOLD}{CYAN}{'='*75}{RESET}")
 
 def assert_sandbox(target_path: Path):
     """Safety Guard: Guarantees operations never escape TEMP_DIR."""
@@ -69,9 +70,9 @@ def print_stage_failure(stage_name: str, arch_path: Path, ext_dir: Path, reason:
                         expected_hash: str = None, actual_hash: str = None, 
                         expected_size: int = None, actual_size: int = None):
     """Prints a non-spammy, highly detailed diagnostic breakdown when a test fails."""
-    print(f"\n{BOLD}{RED}{'='*70}{RESET}")
+    print(f"\n{BOLD}{RED}{'='*75}{RESET}")
     print(f"{BOLD}{RED}  FAILURE DIAGNOSTIC IN {stage_name}{RESET}")
-    print(f"{BOLD}{RED}{'='*70}{RESET}")
+    print(f"{BOLD}{RED}{'='*75}{RESET}")
     print(f"  {BOLD}Reason:{RESET} {reason}")
     if expected_hash or actual_hash:
         print(f"  {BOLD}Expected SHA-256:{RESET} {expected_hash}")
@@ -80,17 +81,16 @@ def print_stage_failure(stage_name: str, arch_path: Path, ext_dir: Path, reason:
         print(f"  {BOLD}Expected Size:   {RESET} {expected_size} bytes")
         print(f"  {BOLD}Actual Size:     {RESET} {actual_size} bytes")
 
-    # 1. Print Archive Listing from GTOC
-    print(f"\n  {BOLD}--- GTOC Metadata Table inside Archive (gpucompact.exe -l) ---{RESET}")
-    try:
-        gtoc_out = run_cmd([EXE_NAME, "-l", str(arch_path)])
-        print(gtoc_out)
-    except Exception as e:
-        print(f"  {RED}Could not read GTOC: {e}{RESET}")
+    if arch_path and arch_path.exists():
+        print(f"\n  {BOLD}--- GTOC Metadata Table inside Archive (gpucompact.exe -l) ---{RESET}")
+        try:
+            gtoc_out = run_cmd([EXE_NAME, "-l", str(arch_path)])
+            print(gtoc_out)
+        except Exception as e:
+            print(f"  {RED}Could not read GTOC: {e}{RESET}")
 
-    # 2. Print Summary of Extracted Directory
-    print(f"  {BOLD}--- Actual Extracted Output Folder Summary ({ext_dir.name}) ---{RESET}")
-    if ext_dir.exists():
+    if ext_dir and ext_dir.exists():
+        print(f"  {BOLD}--- Actual Extracted Output Folder Summary ({ext_dir.name}) ---{RESET}")
         files = [p for p in ext_dir.rglob("*") if p.is_file()]
         if files:
             print(f"  Extracted contains {len(files)} file(s). First 10 items:")
@@ -101,13 +101,17 @@ def print_stage_failure(stage_name: str, arch_path: Path, ext_dir: Path, reason:
                 print(f"    ... and {len(files) - 10} more files.")
         else:
             print(f"  {YELLOW}Directory exists but contains ZERO files!{RESET}")
-    else:
-        print(f"  {RED}Extracted directory DOES NOT EXIST on disk!{RESET}")
+    print(f"{BOLD}{RED}{'='*75}{RESET}\n")
 
-    print(f"{BOLD}{RED}{'='*70}{RESET}\n")
+def generate_thue_morse(length: int) -> bytes:
+    """Generates a Thue-Morse sequence (worst-case repetitive pattern for prefix doubling)."""
+    seq = bytearray([0])
+    while len(seq) < length:
+        seq.extend([1 - b for b in seq])
+    return bytes(seq[:length])
 
 def generate_chaotic_test_dataset() -> dict[str, str]:
-    print(f"Generating test vectors in {DATA_DIR}...")
+    print(f"Generating comprehensive edge-case test vectors in {DATA_DIR}...")
     if DATA_DIR.exists():
         assert_sandbox(DATA_DIR)
         shutil.rmtree(DATA_DIR)
@@ -116,50 +120,90 @@ def generate_chaotic_test_dataset() -> dict[str, str]:
     test_files = {}
     root_prefix = DATA_DIR.name
 
-    empty_p = DATA_DIR / "0_empty.bin"
-    empty_p.write_bytes(b"")
-    test_files[f"{root_prefix}/0_empty.bin"] = compute_sha256(empty_p)
+    # 1. Micro Edge Cases & Prime/Unaligned Sizes
+    micro_sizes = [0, 1, 2, 3, 7, 15, 31, 63, 127, 255, 513, 1025, 4097, 65537]
+    micro_dir = DATA_DIR / "sizes_edge_cases"
+    micro_dir.mkdir(exist_ok=True)
+    for sz in micro_sizes:
+        p = micro_dir / f"size_{sz}_bytes.bin"
+        if sz == 0:
+            p.write_bytes(b"")
+        else:
+            pattern = (b"A" * (sz // 2)) + (b"B" * (sz - (sz // 2)))
+            p.write_bytes(pattern)
+        test_files[f"{root_prefix}/sizes_edge_cases/size_{sz}_bytes.bin"] = compute_sha256(p)
 
-    one_p = DATA_DIR / "1_byte.bin"
-    one_p.write_bytes(b"\x42")
-    test_files[f"{root_prefix}/1_byte.bin"] = compute_sha256(one_p)
+    # 2. Purely Periodic Strings (Period P = 1, 2, 3, 7, 256)
+    period_dir = DATA_DIR / "periodic_tests"
+    period_dir.mkdir(exist_ok=True)
+    
+    # Period 1 (all equal RLE-1 mode)
+    p1 = period_dir / "period_1_all_zeros_2mb.bin"
+    p1.write_bytes(b"\x00" * (2 * 1024 * 1024))
+    test_files[f"{root_prefix}/periodic_tests/period_1_all_zeros_2mb.bin"] = compute_sha256(p1)
 
-    zeros_p = DATA_DIR / "2mb_zeros.bin"
-    zeros_p.write_bytes(b"\x00" * (2 * 1024 * 1024))
-    test_files[f"{root_prefix}/2mb_zeros.bin"] = compute_sha256(zeros_p)
+    p1_ff = period_dir / "period_1_all_ones_2mb.bin"
+    p1_ff.write_bytes(b"\xFF" * (2 * 1024 * 1024))
+    test_files[f"{root_prefix}/periodic_tests/period_1_all_ones_2mb.bin"] = compute_sha256(p1_ff)
 
-    ones_p = DATA_DIR / "2mb_ones.bin"
-    ones_p.write_bytes(b"\xFF" * (2 * 1024 * 1024))
-    test_files[f"{root_prefix}/2mb_ones.bin"] = compute_sha256(ones_p)
+    # Period 2 ("AB" * 1M)
+    p2 = period_dir / "period_2_ab_2mb.bin"
+    p2.write_bytes(b"AB" * (1024 * 1024))
+    test_files[f"{root_prefix}/periodic_tests/period_2_ab_2mb.bin"] = compute_sha256(p2)
 
-    rand_p = DATA_DIR / "2mb_random.bin"
-    rand_p.write_bytes(os.urandom(2 * 1024 * 1024))
-    test_files[f"{root_prefix}/2mb_random.bin"] = compute_sha256(rand_p)
+    # Period 3 ("ABC" * 700K)
+    p3 = period_dir / "period_3_abc_2mb.bin"
+    p3.write_bytes((b"ABC" * ((2 * 1024 * 1024) // 3 + 1))[:2 * 1024 * 1024])
+    test_files[f"{root_prefix}/periodic_tests/period_3_abc_2mb.bin"] = compute_sha256(p3)
 
-    text_sample = ("#include <iostream>\nint main() { std::cout << \"GPUCompact Test Stream!\"; return 0; }\n" * 100).encode("utf-8")
+    # Period 7
+    p7 = period_dir / "period_7_prime_2mb.bin"
+    p7.write_bytes((b"ABCDEFG" * ((2 * 1024 * 1024) // 7 + 1))[:2 * 1024 * 1024])
+    test_files[f"{root_prefix}/periodic_tests/period_7_prime_2mb.bin"] = compute_sha256(p7)
+
+    # Period 256 (all distinct byte ramp)
+    p256 = period_dir / "period_256_ramp_2mb.bin"
+    ramp = bytes([i & 0xFF for i in range(256)])
+    p256.write_bytes(ramp * ((2 * 1024 * 1024) // 256))
+    test_files[f"{root_prefix}/periodic_tests/period_256_ramp_2mb.bin"] = compute_sha256(p256)
+
+    # 3. High-Entropy Random Data (Overflow & Raw Fallback)
+    rand_p = DATA_DIR / "incompressible_random_3mb.bin"
+    rand_p.write_bytes(os.urandom(3 * 1024 * 1024))
+    test_files[f"{root_prefix}/incompressible_random_3mb.bin"] = compute_sha256(rand_p)
+
+    # 4. Structured Text & Code
+    text_sample = ("#include <iostream>\nint main() { std::cout << \"GPUCompact Fast Archiver!\"; return 0; }\n" * 100).encode("utf-8")
     text_data = (text_sample * ((2 * 1024 * 1024) // len(text_sample) + 1))[:2 * 1024 * 1024]
-    text_p = DATA_DIR / "2mb_code.txt"
+    text_p = DATA_DIR / "structured_code_2mb.txt"
     text_p.write_bytes(text_data)
-    test_files[f"{root_prefix}/2mb_code.txt"] = compute_sha256(text_p)
+    test_files[f"{root_prefix}/structured_code_2mb.txt"] = compute_sha256(text_p)
 
-    utf8_dir = DATA_DIR / "utf8_test" / "sub_f"
+    # 5. Thue-Morse Suffix Doubling Stressor
+    tm_p = DATA_DIR / "thue_morse_1mb.bin"
+    tm_p.write_bytes(generate_thue_morse(1024 * 1024))
+    test_files[f"{root_prefix}/thue_morse_1mb.bin"] = compute_sha256(tm_p)
+
+    # 6. Deep Unicode, Emojis, and Special Characters
+    utf8_dir = DATA_DIR / "unicode_tests" / "sub_f" / "deep_folder"
     utf8_dir.mkdir(parents=True, exist_ok=True)
-    utf8_p = utf8_dir / "Képernyőfelvétel_日本語_test.txt"
-    utf8_p.write_text("Hungary: Árvíztűrő tükörfúrógép | CJK: 漢字 テスト | Universal UTF-8 Validation", encoding="utf-8")
-    test_files[f"{root_prefix}/utf8_test/sub_f/Képernyőfelvétel_日本語_test.txt"] = compute_sha256(utf8_p)
+    utf8_p = utf8_dir / "Képernyőfelvétel_日本語_漢字_🔥_test.txt"
+    utf8_p.write_text("Hungary: Árvíztűrő tükörfúrógép | CJK: 漢字 テスト | Emojis: 🚀⚡🦀🔥 | Symbols: §±µ¿", encoding="utf-8")
+    test_files[f"{root_prefix}/unicode_tests/sub_f/deep_folder/Képernyőfelvétel_日本語_漢字_🔥_test.txt"] = compute_sha256(utf8_p)
 
-    micro_dir = DATA_DIR / "micro_cluster"
-    micro_dir.mkdir(parents=True, exist_ok=True)
-    for i in range(200):
-        sub_d = micro_dir / f"folder_{i % 5}"
+    # 7. Micro-File Cluster (300 small JSON files across 5 folders)
+    cluster_dir = DATA_DIR / "micro_cluster"
+    cluster_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(300):
+        sub_d = cluster_dir / f"folder_{i % 5}"
         sub_d.mkdir(exist_ok=True)
-        mf_p = sub_d / f"micro_file_{i}.json"
-        mf_content = f'{{"id": {i}, "data": "{ "X" * (i * 10) }"}}\n'.encode("utf-8")
+        mf_p = sub_d / f"doc_{i}.json"
+        mf_content = f'{{"id": {i}, "tag": "test_token_{i % 10}", "payload": "{ "Z" * (i * 7) }"}}\n'.encode("utf-8")
         mf_p.write_bytes(mf_content)
-        rel_key = f"{root_prefix}/micro_cluster/folder_{i % 5}/micro_file_{i}.json"
+        rel_key = f"{root_prefix}/micro_cluster/folder_{i % 5}/doc_{i}.json"
         test_files[rel_key] = compute_sha256(mf_p)
 
-    print(f"  -> Generated {len(test_files)} test items (~8.5 MB total payload).")
+    print(f"  -> Generated {len(test_files)} total test items (~15.2 MB total payload).")
     return test_files
 
 def verify_extracted_directory(arch_p: Path, extracted_dir: Path, expected_hashes: dict[str, str], filter_prefix: str = "", stage_name: str = "EXTRACT") -> int:
@@ -194,10 +238,10 @@ def main():
         print(f"{RED}[FATAL ERROR] {EXE_NAME} not found in current directory!{RESET}")
         sys.exit(1)
 
-    print(f"{BOLD}GPUCOMPACT AUTOMATED REGRESSION & INTEGRITY TEST SUITE{RESET}")
+    print(f"{BOLD}GPUCOMPACT COMPREHENSIVE REGRESSION & INTEGRITY SUITE{RESET}")
     print(f"Sandbox Target: {TEMP_DIR}")
 
-    print_header("STAGE 1: GENERATING CHAOTIC TEST DATASET")
+    print_header("STAGE 1: GENERATING CHAOTIC & EDGE-CASE TEST DATASET")
     reference_hashes = generate_chaotic_test_dataset()
 
     passed_tests = 0
@@ -205,7 +249,7 @@ def main():
 
     try:
         # -----------------------------------------------------------------
-        # STAGE 2: ALL PROFILES
+        # STAGE 2: ALL PROFILE PRESETS
         # -----------------------------------------------------------------
         print_header("STAGE 2: TESTING ALL PROFILE PRESETS (COMPRESS -> EXTRACT -> SHA)")
         profiles = ["best_speed", "speed", "balanced", "ratio", "best_ratio"]
@@ -227,134 +271,189 @@ def main():
             passed_tests += 1
 
         # -----------------------------------------------------------------
-        # STAGE 3: SELECTIVE SINGLE-FILE EXTRACTION
+        # STAGE 3: EXTREME & CUSTOM HYPERPARAMETER SWEEPS
         # -----------------------------------------------------------------
-        print_header("STAGE 3: SELECTIVE SINGLE-FILE EXTRACTION")
-        single_target = "source_data/utf8_test/sub_f/Képernyőfelvétel_日本語_test.txt"
-        arch_p = TEMP_DIR / "archive_balanced.gcmp"
-        ext_single_dir = TEMP_DIR / "extracted_single_file"
+        print_header("STAGE 3: CUSTOM HYPERPARAMETER LIMITS (--macro, --mini, --L)")
+        custom_configs = [
+            {"name": "tiny_chunks", "macro": "1", "mini": "128", "L": "512"},
+            {"name": "large_chunks", "macro": "8", "mini": "4096", "L": "4096"}
+        ]
 
-        assert_sandbox(ext_single_dir)
+        for cfg in custom_configs:
+            arch_p = TEMP_DIR / f"archive_custom_{cfg['name']}.gcmp"
+            ext_dir = TEMP_DIR / f"extracted_custom_{cfg['name']}"
 
-        print(f"Extracting single nested item: '{single_target}'...", end="", flush=True)
-        run_cmd([
-            str(exe_path), "-d", "-i", str(arch_p), "-o", str(ext_single_dir),
-            "--extract", single_target, "--collision", "replace"
-        ])
+            assert_sandbox(arch_p)
+            assert_sandbox(ext_dir)
 
-        extracted_file_p = ext_single_dir / "Képernyőfelvétel_日本語_test.txt"
-        assert_sandbox(extracted_file_p)
-        if not extracted_file_p.exists():
-            print_stage_failure("STAGE 3 (Selective Single File)", arch_p, ext_single_dir, 
-                                reason=f"Single extracted file not found at {extracted_file_p}",
-                                expected_hash=reference_hashes[single_target], actual_hash="FILE_NOT_FOUND")
-            raise FileNotFoundError(f"Single extracted file not found at {extracted_file_p}")
+            print(f"Testing Custom Config [{cfg['name']} (M={cfg['macro']}MB, m={cfg['mini']}B, L={cfg['L']})]...", end="", flush=True)
 
-        single_hash = compute_sha256(extracted_file_p)
-        expected_hash = reference_hashes[single_target]
-        if single_hash != expected_hash:
-            print_stage_failure("STAGE 3 (Selective Single File)", arch_p, ext_single_dir,
-                                reason=f"Single extracted file SHA-256 mismatch",
-                                expected_hash=expected_hash, actual_hash=single_hash,
-                                expected_size=100, actual_size=extracted_file_p.stat().st_size)
-            raise ValueError("Single file SHA mismatch!")
+            run_cmd([
+                str(exe_path), "-c", "-i", str(DATA_DIR), "-o", str(arch_p), "-f",
+                "--macro", cfg["macro"], "--mini", cfg["mini"], "--L", cfg["L"]
+            ])
+            run_cmd([str(exe_path), "-d", "-i", str(arch_p), "-o", str(ext_dir), "--collision", "replace"])
 
-        print(f" {GREEN}[PASS]{RESET} (Bit-exact SHA-256 match)")
+            v_count = verify_extracted_directory(arch_p, ext_dir, reference_hashes, stage_name=f"STAGE 3 ({cfg['name']})")
+            print(f" {GREEN}[PASS]{RESET} ({v_count} files verified 100% SHA match)")
+            passed_tests += 1
+
+        # -----------------------------------------------------------------
+        # STAGE 4: DIRECT SINGLE-FILE ARCHIVING
+        # -----------------------------------------------------------------
+        print_header("STAGE 4: DIRECT SINGLE-FILE ARCHIVING (FILE -> GCMP -> RESTORE)")
+        single_src = DATA_DIR / "periodic_tests" / "period_7_prime_2mb.bin"
+        single_arch = TEMP_DIR / "direct_single_file.gcmp"
+        single_ext_dir = TEMP_DIR / "extracted_direct_single"
+
+        assert_sandbox(single_arch)
+        assert_sandbox(single_ext_dir)
+
+        print("Testing Direct Single-File Compression...", end="", flush=True)
+        run_cmd([str(exe_path), "-c", "-i", str(single_src), "-o", str(single_arch), "-f"])
+        run_cmd([str(exe_path), "-d", "-i", str(single_arch), "-o", str(single_ext_dir), "--collision", "replace"])
+
+        restored_file = single_ext_dir / "period_7_prime_2mb.bin"
+        assert_sandbox(restored_file)
+        if not restored_file.exists() or compute_sha256(restored_file) != compute_sha256(single_src):
+            print_stage_failure("STAGE 4 (Direct Single File)", single_arch, single_ext_dir, reason="Direct single-file hash mismatch!")
+            raise ValueError("Direct single file restore failed!")
+
+        print(f" {GREEN}[PASS]{RESET} (Direct single-file verified 100% SHA match)")
         passed_tests += 1
 
         # -----------------------------------------------------------------
-        # STAGE 4: SELECTIVE SUB-FOLDER EXTRACTION
+        # STAGE 5: SELECTIVE EXTRACTION (SINGLE FILE & SUBFOLDER)
         # -----------------------------------------------------------------
-        print_header("STAGE 4: SELECTIVE SUB-FOLDER EXTRACTION")
-        subfolder_target = "source_data/micro_cluster"
-        ext_sub_dir = TEMP_DIR / "extracted_subfolder"
+        print_header("STAGE 5: SELECTIVE EXTRACTION (SUBTREE & SINGLE ITEM)")
+        base_arch = TEMP_DIR / "archive_balanced.gcmp"
 
+        # A: Single nested UTF-8 file
+        single_target = "source_data/unicode_tests/sub_f/deep_folder/Képernyőfelvétel_日本語_漢字_🔥_test.txt"
+        ext_single_dir = TEMP_DIR / "extracted_selective_single"
+        assert_sandbox(ext_single_dir)
+
+        print(f"Extracting Single Item: '{single_target}'...", end="", flush=True)
+        run_cmd([str(exe_path), "-d", "-i", str(base_arch), "-o", str(ext_single_dir), "--extract", single_target, "--collision", "replace"])
+
+        extracted_file_p = ext_single_dir / "Képernyőfelvétel_日本語_漢字_🔥_test.txt"
+        assert_sandbox(extracted_file_p)
+        if not extracted_file_p.exists() or compute_sha256(extracted_file_p) != reference_hashes[single_target]:
+            print_stage_failure("STAGE 5 (Selective Single File)", base_arch, ext_single_dir, reason="Single file hash mismatch or not found!")
+            raise ValueError("Selective single file extraction failed!")
+        print(f" {GREEN}[PASS]{RESET}")
+
+        # B: Subfolder tree
+        subfolder_target = "source_data/micro_cluster"
+        ext_sub_dir = TEMP_DIR / "extracted_selective_subfolder"
         assert_sandbox(ext_sub_dir)
 
-        print(f"Extracting subfolder tree: '{subfolder_target}'...", end="", flush=True)
-        run_cmd([
-            str(exe_path), "-d", "-i", str(arch_p), "-o", str(ext_sub_dir),
-            "--extract", subfolder_target, "--collision", "replace"
-        ])
-
-        v_count = verify_extracted_directory(arch_p, ext_sub_dir, reference_hashes, 
-                                             filter_prefix="source_data/micro_cluster", stage_name="STAGE 4 (Subfolder Extract)")
+        print(f"Extracting Subfolder Tree: '{subfolder_target}'...", end="", flush=True)
+        run_cmd([str(exe_path), "-d", "-i", str(base_arch), "-o", str(ext_sub_dir), "--extract", subfolder_target, "--collision", "replace"])
+        v_count = verify_extracted_directory(base_arch, ext_sub_dir, reference_hashes, filter_prefix="source_data/micro_cluster", stage_name="STAGE 5 (Subfolder Extract)")
         print(f" {GREEN}[PASS]{RESET} ({v_count} sub-files verified 100% SHA match)")
         passed_tests += 1
 
         # -----------------------------------------------------------------
-        # STAGE 5: ARCHIVE APPENDING & COLLISION PROTOCOLS
+        # STAGE 6: COLLISION POLICIES (REPLACE, RENAME, SKIP)
         # -----------------------------------------------------------------
-        print_header("STAGE 5: ARCHIVE APPENDING & COLLISION PROTOCOLS")
-        append_arch = TEMP_DIR / "append_base.gcmp"
-        assert_sandbox(append_arch)
+        print_header("STAGE 6: COLLISION PROTOCOLS (REPLACE, RENAME, SKIP)")
+        coll_dir = TEMP_DIR / "collision_test"
+        coll_dir.mkdir(exist_ok=True)
+        assert_sandbox(coll_dir)
 
-        print("Creating base archive from folder...", end="", flush=True)
-        run_cmd([str(exe_path), "-c", "-i", str(DATA_DIR), "-o", str(append_arch), "-f"])
-        print(f" {GREEN}[DONE]{RESET}")
+        # Populate with existing dummy file
+        dummy_p = coll_dir / "period_7_prime_2mb.bin"
+        dummy_p.write_bytes(b"DUMMY_OLD_DATA")
+        dummy_old_hash = compute_sha256(dummy_p)
 
-        extra_file = TEMP_DIR / "extra_test_file.txt"
-        extra_file.write_text("Extra appended payload test data\n", encoding="utf-8")
-        extra_hash = compute_sha256(extra_file)
-        extra_size = extra_file.stat().st_size
+        # 1. SKIP Mode
+        print("Testing Collision Mode [skip]...", end="", flush=True)
+        run_cmd([str(exe_path), "-d", "-i", str(single_arch), "-o", str(coll_dir), "--collision", "skip"])
+        if compute_sha256(dummy_p) != dummy_old_hash:
+            raise RuntimeError("Collision 'skip' modified existing file!")
+        print(f" {GREEN}[PASS]{RESET}")
 
-        print("Appending new item...", end="", flush=True)
-        run_cmd([str(exe_path), "-i", str(append_arch), "-a", str(extra_file), "--collision", "replace"])
-        print(f" {GREEN}[DONE]{RESET}")
+        # 2. RENAME Mode
+        print("Testing Collision Mode [rename]...", end="", flush=True)
+        run_cmd([str(exe_path), "-d", "-i", str(single_arch), "-o", str(coll_dir), "--collision", "rename"])
+        renamed_p = coll_dir / "period_7_prime_2mb (1).bin"
+        assert_sandbox(renamed_p)
+        if not renamed_p.exists() or compute_sha256(renamed_p) != reference_hashes["source_data/periodic_tests/period_7_prime_2mb.bin"]:
+            raise RuntimeError("Collision 'rename' failed to create indexed copy!")
+        print(f" {GREEN}[PASS]{RESET}")
 
-        ext_append_dir = TEMP_DIR / "extracted_append"
-        assert_sandbox(ext_append_dir)
-        print("Extracting appended archive...", end="", flush=True)
-        run_cmd([str(exe_path), "-d", "-i", str(append_arch), "-o", str(ext_append_dir), "--collision", "replace"])
-
-        # Verify all base files
-        verify_extracted_directory(append_arch, ext_append_dir, reference_hashes, stage_name="STAGE 5 (Appended Base Files)")
-
-        # Verify extra appended file
-        ext_extra_p = ext_append_dir / "extra_test_file.txt"
-        if not ext_extra_p.exists():
-            print_stage_failure("STAGE 5 (Archive Appending)", append_arch, ext_append_dir,
-                                reason=f"Appended file 'extra_test_file.txt' was NOT created on disk!",
-                                expected_hash=extra_hash, actual_hash="FILE_NOT_FOUND",
-                                expected_size=extra_size, actual_size=0)
-            raise FileNotFoundError("Appended file missing from extracted output!")
-
-        actual_extra_hash = compute_sha256(ext_extra_p)
-        actual_extra_size = ext_extra_p.stat().st_size
-        if actual_extra_hash != extra_hash:
-            print_stage_failure("STAGE 5 (Archive Appending)", append_arch, ext_append_dir,
-                                reason=f"Appended file 'extra_test_file.txt' SHA-256 mismatch!",
-                                expected_hash=extra_hash, actual_hash=actual_extra_hash,
-                                expected_size=extra_size, actual_size=actual_extra_size)
-            raise ValueError("Appended file SHA mismatch!")
-
-        print(f" {GREEN}[PASS]{RESET} (Appended archive contents verified 100% SHA match)")
+        # 3. REPLACE Mode
+        print("Testing Collision Mode [replace]...", end="", flush=True)
+        run_cmd([str(exe_path), "-d", "-i", str(single_arch), "-o", str(coll_dir), "--collision", "replace"])
+        if compute_sha256(dummy_p) != reference_hashes["source_data/periodic_tests/period_7_prime_2mb.bin"]:
+            raise RuntimeError("Collision 'replace' failed to overwrite target!")
+        print(f" {GREEN}[PASS]{RESET}")
         passed_tests += 1
 
         # -----------------------------------------------------------------
-        # STAGE 6: HIERARCHICAL DIRECTORY DELETION (-r)
+        # STAGE 7: ARCHIVE APPENDING & LIVE MERGE
         # -----------------------------------------------------------------
-        print_header("STAGE 6: HIERARCHICAL DIRECTORY DELETION (-r)")
-        del_arch = TEMP_DIR / "deletion_test.gcmp"
-        assert_sandbox(del_arch)
-        shutil.copy(arch_p, del_arch)
+        print_header("STAGE 7: ARCHIVE APPENDING & METADATA MERGING")
+        append_arch = TEMP_DIR / "append_suite.gcmp"
+        assert_sandbox(append_arch)
 
-        print("Deleting 'micro_cluster' and 'utf8_test' from archive...", end="", flush=True)
-        run_cmd([str(exe_path), "-i", str(del_arch), "-r", "source_data/micro_cluster", "source_data/utf8_test"])
+        print("Creating base archive...", end="", flush=True)
+        run_cmd([str(exe_path), "-c", "-i", str(DATA_DIR), "-o", str(append_arch), "-f"])
         print(f" {GREEN}[DONE]{RESET}")
 
-        ext_del_dir = TEMP_DIR / "extracted_deletion"
+        extra_p = TEMP_DIR / "appended_extra.bin"
+        extra_p.write_bytes(b"EXTRA_APPENDED_STREAM_PAYLOAD_" * 1024)
+        extra_hash = compute_sha256(extra_p)
+
+        print("Appending new payload to live archive...", end="", flush=True)
+        run_cmd([str(exe_path), "-i", str(append_arch), "-a", str(extra_p), "--collision", "replace"])
+        print(f" {GREEN}[DONE]{RESET}")
+
+        ext_append_dir = TEMP_DIR / "extracted_append_suite"
+        assert_sandbox(ext_append_dir)
+        run_cmd([str(exe_path), "-d", "-i", str(append_arch), "-o", str(ext_append_dir), "--collision", "replace"])
+
+        verify_extracted_directory(append_arch, ext_append_dir, reference_hashes, stage_name="STAGE 7 (Appended Base)")
+        ext_extra = ext_append_dir / "appended_extra.bin"
+        if not ext_extra.exists() or compute_sha256(ext_extra) != extra_hash:
+            raise ValueError("Appended item missing or corrupted!")
+        print(f" {GREEN}[PASS]{RESET} (All base files + appended item verified 100% SHA match)")
+        passed_tests += 1
+
+        # -----------------------------------------------------------------
+        # STAGE 8: HIERARCHICAL DIRECTORY DELETION (-r)
+        # -----------------------------------------------------------------
+        print_header("STAGE 8: HIERARCHICAL DIRECTORY DELETION (-r)")
+        del_arch = TEMP_DIR / "deletion_suite.gcmp"
+        assert_sandbox(del_arch)
+        shutil.copy(base_arch, del_arch)
+
+        print("Pruning 'micro_cluster' and 'unicode_tests' from archive...", end="", flush=True)
+        run_cmd([str(exe_path), "-i", str(del_arch), "-r", "source_data/micro_cluster", "source_data/unicode_tests"])
+        print(f" {GREEN}[DONE]{RESET}")
+
+        ext_del_dir = TEMP_DIR / "extracted_deletion_suite"
         assert_sandbox(ext_del_dir)
-        print("Extracting remaining files from pruned archive...", end="", flush=True)
         run_cmd([str(exe_path), "-d", "-i", str(del_arch), "-o", str(ext_del_dir), "--collision", "replace"])
 
-        if (ext_del_dir / "source_data" / "micro_cluster").exists() or (ext_del_dir / "source_data" / "utf8_test").exists():
-            print_stage_failure("STAGE 6 (Deletion)", del_arch, ext_del_dir, reason="Removed subdirectories still exist in extracted output!")
-            raise RuntimeError("Deletion failed!")
+        if (ext_del_dir / "source_data" / "micro_cluster").exists() or (ext_del_dir / "source_data" / "unicode_tests").exists():
+            raise RuntimeError("Deleted directories still present in extracted output!")
 
-        verify_extracted_directory(del_arch, ext_del_dir, reference_hashes, filter_prefix="source_data/2mb_zeros.bin", stage_name="STAGE 6 (Pruned Extract)")
-        verify_extracted_directory(del_arch, ext_del_dir, reference_hashes, filter_prefix="source_data/2mb_random.bin", stage_name="STAGE 6 (Pruned Extract)")
-        print(f" {GREEN}[PASS]{RESET} (Target directories removed cleanly, remaining files verified)")
+        verify_extracted_directory(del_arch, ext_del_dir, reference_hashes, filter_prefix="source_data/periodic_tests", stage_name="STAGE 8 (Pruned Extract)")
+        verify_extracted_directory(del_arch, ext_del_dir, reference_hashes, filter_prefix="source_data/sizes_edge_cases", stage_name="STAGE 8 (Pruned Extract)")
+        print(f" {GREEN}[PASS]{RESET} (Pruned archive contents verified 100% SHA match)")
+        passed_tests += 1
+
+        # -----------------------------------------------------------------
+        # STAGE 9: ARCHIVE METADATA & GTOC INSPECTION (-l)
+        # -----------------------------------------------------------------
+        print_header("STAGE 9: ARCHIVE METADATA & GTOC QUERY (-l)")
+        print("Querying GTOC Table of Contents...", end="", flush=True)
+        gtoc_output = run_cmd([str(exe_path), "-l", str(base_arch)])
+        if "GPUCOMPACT ARCHIVE METADATA" not in gtoc_output or "Overall Ratio" not in gtoc_output:
+            raise RuntimeError("GTOC metadata query returned invalid output!")
+        print(f" {GREEN}[PASS]{RESET} (GTOC parsing validated)")
         passed_tests += 1
 
     except Exception as e:

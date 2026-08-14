@@ -523,6 +523,7 @@ void remove_from_archive(const std::string &archive_path,
   fin.seekg(footer.gtoc_offset);
   std::vector<char> gtoc_blob(gtoc_size);
   fin.read(gtoc_blob.data(), gtoc_size);
+  fin.close();
 
   uint64_t fe_size = footer.num_files * sizeof(FileEntry);
   uint64_t ce_size = footer.num_chunks * sizeof(ChunkEntry);
@@ -530,9 +531,6 @@ void remove_from_archive(const std::string &archive_path,
 
   const char *string_table = gtoc_blob.data();
   const char *fe_blob = gtoc_blob.data() + str_size;
-  const char *ce_blob = gtoc_blob.data() + str_size + fe_size;
-
-  auto t_start = std::chrono::high_resolution_clock::now();
 
   std::unordered_set<std::string> remove_set;
   remove_set.reserve(files_to_remove.size());
@@ -548,14 +546,6 @@ void remove_from_archive(const std::string &archive_path,
     return;
 
   std::vector<std::pair<FileEntry, std::string>> surviving_files;
-  std::set<uint32_t> surviving_chunks;
-
-  uint64_t total_archive_uncomp_bytes = 0;
-  for (uint32_t i = 0; i < footer.num_files; i++) {
-    FileEntry fe = get_file_entry(fe_blob, i);
-    total_archive_uncomp_bytes += fe.file_size;
-  }
-
   for (uint32_t i = 0; i < footer.num_files; i++) {
     FileEntry fe = get_file_entry(fe_blob, i);
     std::string rel_p = ensure_utf8(string_table + fe.path_offset);
@@ -577,109 +567,60 @@ void remove_from_archive(const std::string &archive_path,
 
     if (!should_remove) {
       surviving_files.push_back({fe, rel_p});
-      for (uint32_t c = fe.chunk_start; c < fe.chunk_start + fe.chunk_count;
-           c++) {
-        surviving_chunks.insert(c);
-      }
-    }
-
-    if (progress_cb && (i % 500 == 0 || i == footer.num_files - 1)) {
-      double elapsed = std::chrono::duration<double>(
-                           std::chrono::high_resolution_clock::now() - t_start)
-                           .count();
-      uint64_t est_processed = (uint64_t)((double)(i + 1) / footer.num_files *
-                                          total_archive_uncomp_bytes * 0.05);
-      progress_cb(est_processed,
-                  total_archive_uncomp_bytes > 0 ? total_archive_uncomp_bytes
-                                                 : 1,
-                  0, elapsed);
     }
   }
 
-  if (surviving_files.empty() && !allow_empty)
-    throw std::runtime_error("Cannot delete all files from archive.");
+  if (surviving_files.empty()) {
+    if (!allow_empty)
+      throw std::runtime_error("Cannot delete all files from archive.");
 
-  std::string tmp_path = archive_path + ".tmp_remove";
-  std::ofstream fout(utf8_to_path(tmp_path), std::ios::binary);
-  fout.write("GCMP", 4);
-
-  std::unordered_map<uint32_t, uint32_t> chunk_id_map;
-  std::vector<ChunkEntry> new_chunk_entries;
-  uint64_t total_uncomp_bytes = 0;
-  for (uint32_t old_c_idx : surviving_chunks) {
-    ChunkEntry ce = get_chunk_entry(ce_blob, old_c_idx);
-    total_uncomp_bytes += ce.uncomp_size;
+    std::ofstream fout(utf8_to_path(archive_path), std::ios::binary);
+    fout.write("GCMP", 4);
+    GTOCFooter new_footer = footer;
+    new_footer.gtoc_offset = 4;
+    new_footer.num_files = 0;
+    new_footer.num_chunks = 0;
+    fout.write((char *)&new_footer, sizeof(GTOCFooter));
+    fout.close();
+    return;
   }
 
-  uint64_t bytes_processed = 0;
-  uint64_t bytes_compressed = 0;
-  uint32_t new_c_idx = 0;
+  // Solid Stream Repacking: Extract surviving files and rebuild solid archive
+  std::string temp_extract_dir =
+      archive_path + ".tmp_prune_" +
+      std::to_string(
+          std::chrono::system_clock::now().time_since_epoch().count());
+  fs::create_directories(utf8_to_path(temp_extract_dir));
 
-  for (uint32_t old_c_idx : surviving_chunks) {
-    ChunkEntry ce = get_chunk_entry(ce_blob, old_c_idx);
-    chunk_id_map[old_c_idx] = new_c_idx++;
+  LaunchConfig config;
+  config.macro_mb = footer.macro_mb;
+  config.mini_size = footer.mini_size;
+  config.L = footer.L_state;
 
-    fin.seekg(ce.payload_offset);
-    std::vector<char> buf(ce.comp_size);
-    fin.read(buf.data(), ce.comp_size);
+  extract_archive(archive_path, temp_extract_dir, config, nullptr, "", true,
+                  nullptr, nullptr, "replace");
 
-    uint64_t new_off = fout.tellp();
-    fout.write(buf.data(), ce.comp_size);
-
-    ChunkEntry new_ce = ce;
-    new_ce.payload_offset = new_off;
-    new_chunk_entries.push_back(new_ce);
-
-    bytes_processed += ce.uncomp_size;
-    bytes_compressed += ce.comp_size;
-
-    if (progress_cb) {
-      double elapsed = std::chrono::duration<double>(
-                           std::chrono::high_resolution_clock::now() - t_start)
-                           .count();
-      progress_cb(bytes_processed, total_uncomp_bytes, bytes_compressed,
-                  elapsed);
-    }
-  }
-
-  std::string new_string_table;
-  std::vector<FileEntry> new_file_entries;
+  std::vector<std::pair<std::string, std::string>> files_to_pack;
+  files_to_pack.reserve(surviving_files.size());
 
   for (const auto &[fe, rel_p] : surviving_files) {
-    uint64_t p_off = new_string_table.size();
-    new_string_table.append(rel_p);
-    new_string_table.push_back('\0');
-
-    FileEntry new_fe = fe;
-    new_fe.path_offset = p_off;
-    auto it = chunk_id_map.find(fe.chunk_start);
-    new_fe.chunk_start = (it != chunk_id_map.end()) ? it->second : 0;
-    new_file_entries.push_back(new_fe);
+    fs::path full_p = utf8_to_path(temp_extract_dir) / utf8_to_path(rel_p);
+    files_to_pack.push_back({path_to_utf8(full_p), rel_p});
   }
 
-  uint64_t new_gtoc_off = fout.tellp();
-  fout.write(new_string_table.data(), new_string_table.size());
-  fout.write((char *)new_file_entries.data(),
-             new_file_entries.size() * sizeof(FileEntry));
-  fout.write((char *)new_chunk_entries.data(),
-             new_chunk_entries.size() * sizeof(ChunkEntry));
-
-  GTOCFooter new_footer = footer;
-  new_footer.gtoc_offset = new_gtoc_off;
-  new_footer.num_files = (uint32_t)new_file_entries.size();
-  new_footer.num_chunks = (uint32_t)new_chunk_entries.size();
-  fout.write((char *)&new_footer, sizeof(GTOCFooter));
-
-  fin.close();
-  fout.close();
+  std::string tmp_repack_path = archive_path + ".tmp_repack";
+  build_archive_explicit(files_to_pack, tmp_repack_path, config, nullptr, true,
+                         progress_cb);
 
   std::error_code ec;
+  fs::remove_all(utf8_to_path(temp_extract_dir), ec);
+
   fs::remove(utf8_to_path(archive_path), ec);
-  fs::rename(utf8_to_path(tmp_path), utf8_to_path(archive_path), ec);
+  fs::rename(utf8_to_path(tmp_repack_path), utf8_to_path(archive_path), ec);
   if (ec) {
-    fs::copy_file(utf8_to_path(tmp_path), utf8_to_path(archive_path),
+    fs::copy_file(utf8_to_path(tmp_repack_path), utf8_to_path(archive_path),
                   fs::copy_options::overwrite_existing, ec);
-    fs::remove(utf8_to_path(tmp_path), ec);
+    fs::remove(utf8_to_path(tmp_repack_path), ec);
   }
 }
 

@@ -223,7 +223,9 @@ __global__ void build_tans_all_kernel(
 
   int step = (L / 2) + 3;
   for (int k = 0; k < s_p[tid]; k++) {
-    symbol_spread[((prefix + k) * step) % L] = tid;
+    int spread_idx = ((prefix + k) * step) % L;
+    if (spread_idx >= 0 && spread_idx < L)
+      symbol_spread[spread_idx] = tid;
   }
   __syncthreads();
 
@@ -232,11 +234,16 @@ __global__ void build_tans_all_kernel(
       next_state[i] = s_p[i];
     for (int x = L; x < 2 * L; x++) {
       int s = symbol_spread[x - L];
-      decoding_symbol[x - L] = s;
-      int state = next_state[s];
-      decoding_table[x - L] = state;
-      encoding_table[prefix_p_out[s] + state - s_p[s]] = x;
-      next_state[s] = state + 1;
+      int dec_idx = x - L;
+      if (dec_idx >= 0 && dec_idx < L) {
+        decoding_symbol[dec_idx] = s;
+        int state = next_state[s];
+        decoding_table[dec_idx] = state;
+        int enc_idx = prefix_p_out[s] + state - s_p[s];
+        if (enc_idx >= 0 && enc_idx < L)
+          encoding_table[enc_idx] = x;
+        next_state[s] = state + 1;
+      }
     }
   }
 }

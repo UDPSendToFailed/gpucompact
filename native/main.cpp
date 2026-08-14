@@ -237,10 +237,10 @@ int main(int argc, char **argv) {
           "Invalid --mini size (" + std::to_string(config.mini_size) +
           " B). Must be a power of 2 between 128 and 16384.");
     }
-    if (config.L < 256 || config.L > 8192 || !is_power_of_two(config.L)) {
+    if (config.L < 512 || config.L > 8192 || !is_power_of_two(config.L)) {
       throw std::runtime_error("Invalid --L state window (" +
                                std::to_string(config.L) +
-                               "). Must be a power of 2 between 256 and 8192.");
+                               "). Must be a power of 2 between 512 and 8192 (alphabet size is 257).");
     }
     if (collision_mode != "replace" && collision_mode != "rename" &&
         collision_mode != "skip") {
