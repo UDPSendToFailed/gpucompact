@@ -17,13 +17,6 @@
  */
 #include "kernels.cuh"
 
-__global__ void cast_uint8_to_int32_kernel(const unsigned char *__restrict__ in,
-                                           int *__restrict__ out, int n) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < n)
-    out[idx] = (int)in[idx];
-}
-
 __global__ void bit_to_word_kernel(const unsigned int *__restrict__ bits,
                                    unsigned int *__restrict__ words, int n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -196,20 +189,6 @@ zrle_encode_kernel(const unsigned char *__restrict__ bwt,
     if (s_block_hist[i] > 0) {
       atomicAdd(&hist[i], s_block_hist[i]);
     }
-  }
-}
-
-__global__ void
-compute_histogram_kernel(const unsigned short *__restrict__ symbols,
-                         const unsigned int *__restrict__ lengths,
-                         unsigned int *__restrict__ hist, int num_chunks,
-                         int chunk_size) {
-  int chunk_id = blockIdx.x * blockDim.x + threadIdx.x;
-  if (chunk_id >= num_chunks)
-    return;
-  int length = lengths[chunk_id], base = chunk_id * chunk_size;
-  for (int i = 0; i < length; i++) {
-    atomicAdd(&hist[symbols[base + i]], 1);
   }
 }
 
@@ -538,57 +517,6 @@ __global__ void build_lf_kernel(const int *__restrict__ F_to_L,
   if (idx < n) {
     LF[F_to_L[idx]] = idx;
   }
-}
-
-__global__ void jump_init_kernel(const int *__restrict__ LF,
-                                 const int *__restrict__ primary_indices,
-                                 const uint64_t *__restrict__ chunk_offsets,
-                                 const int *__restrict__ chunk_sizes,
-                                 int *__restrict__ J, int *__restrict__ D) {
-  int cid = blockIdx.y, lid = blockIdx.x * blockDim.x + threadIdx.x,
-      size = chunk_sizes[cid];
-  if (lid >= size)
-    return;
-  uint64_t off = chunk_offsets[cid];
-  int gid = off + lid, prim = off + primary_indices[cid],
-      g_target = off + LF[gid];
-  if (gid == prim) {
-    J[gid] = gid;
-    D[gid] = 0;
-  } else {
-    J[gid] = g_target;
-    D[gid] = 1;
-  }
-}
-
-__global__ void jump_step_kernel(const int *__restrict__ J_in,
-                                 const int *__restrict__ D_in,
-                                 int *__restrict__ J_out,
-                                 int *__restrict__ D_out,
-                                 const uint64_t *__restrict__ offsets,
-                                 const int *__restrict__ sizes) {
-  int cid = blockIdx.y, lid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (lid >= sizes[cid])
-    return;
-  int gid = offsets[cid] + lid, my_J = J_in[gid];
-  J_out[gid] = J_in[my_J];
-  D_out[gid] = D_in[gid] + D_in[my_J];
-}
-
-__global__ void jump_scatter_kernel(const int *__restrict__ D,
-                                    const unsigned char *__restrict__ bwt,
-                                    unsigned char *__restrict__ out,
-                                    const int *__restrict__ primary,
-                                    const uint64_t *__restrict__ offsets,
-                                    const int *__restrict__ sizes) {
-  int cid = blockIdx.y, lid = blockIdx.x * blockDim.x + threadIdx.x,
-      size = sizes[cid];
-  if (lid >= size)
-    return;
-  uint64_t off = offsets[cid];
-  int gid = off + lid, prim = off + primary[cid],
-      d_forw = (gid == prim) ? 0 : (size - D[gid]);
-  out[off + size - 1 - d_forw] = bwt[gid];
 }
 
 __global__ void jump_init_vec_kernel(const int *__restrict__ LF,

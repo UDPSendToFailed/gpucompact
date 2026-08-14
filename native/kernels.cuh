@@ -50,9 +50,6 @@ __device__ inline void cp_async_wait_all() {
 // -------------------------------------------------------------------------
 // HELPER UTILITY KERNEL PROTOTYPES
 // -------------------------------------------------------------------------
-__global__ void cast_uint8_to_int32_kernel(const unsigned char *__restrict__ in,
-                                           int *__restrict__ out, int n);
-
 __global__ void bit_to_word_kernel(const unsigned int *__restrict__ bits,
                                    unsigned int *__restrict__ words, int n);
 
@@ -91,12 +88,6 @@ zrle_encode_kernel(const unsigned char *__restrict__ bwt,
                    uint32_t *__restrict__ hist,
                    int total_size, int chunk_size, int threads_comp);
 
-__global__ void
-compute_histogram_kernel(const unsigned short *__restrict__ symbols,
-                         const unsigned int *__restrict__ lengths,
-                         unsigned int *__restrict__ hist, int num_chunks,
-                         int chunk_size);
-
 __global__ void build_tans_all_kernel(
     const unsigned int *__restrict__ hist, int *__restrict__ p_out,
     int *__restrict__ prefix_p_out, int *__restrict__ max_x,
@@ -132,26 +123,6 @@ __global__ void fill_key_kernel(const uint64_t *__restrict__ offsets,
 
 __global__ void build_lf_kernel(const int *__restrict__ F_to_L,
                                 int *__restrict__ LF, int n);
-
-__global__ void jump_init_kernel(const int *__restrict__ LF,
-                                 const int *__restrict__ primary_indices,
-                                 const uint64_t *__restrict__ chunk_offsets,
-                                 const int *__restrict__ chunk_sizes,
-                                 int *__restrict__ J, int *__restrict__ D);
-
-__global__ void jump_step_kernel(const int *__restrict__ J_in,
-                                 const int *__restrict__ D_in,
-                                 int *__restrict__ J_out,
-                                 int *__restrict__ D_out,
-                                 const uint64_t *__restrict__ offsets,
-                                 const int *__restrict__ sizes);
-
-__global__ void jump_scatter_kernel(const int *__restrict__ D,
-                                    const unsigned char *__restrict__ bwt,
-                                    unsigned char *__restrict__ out,
-                                    const int *__restrict__ primary,
-                                    const uint64_t *__restrict__ offsets,
-                                    const int *__restrict__ sizes);
 
 __global__ void jump_init_vec_kernel(const int *__restrict__ LF,
                                      const int *__restrict__ primary_indices,
