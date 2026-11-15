@@ -697,7 +697,7 @@ bool DecompressionContext::decompress_chunk(int threads_decomp,
       }
 
       int blocks = (num_chunks + threads_decomp - 1) / threads_decomp;
-      size_t smem_size = (2 * L * sizeof(int)) + (size_t)threads_decomp * 256;
+      size_t smem_size = (2 * L * sizeof(int)) + (size_t)threads_decomp * 260;
 
       if (smem_size > 49152) {
         CUDA_CHECK(cudaFuncSetAttribute(

@@ -224,6 +224,7 @@ zrle_encode_kernel(const unsigned char *__restrict__ bwt,
     }
 
     int zero_run = 0, sym_offset = 0, out_base = chunk_id * chunk_size;
+    uint32_t hist0 = 0, hist1 = 0;
     for (int i = start; i < end; i++) {
       unsigned char c = bwt[i], idx = 0;
       for (int j = 0; j < 256; j++) {
@@ -241,11 +242,11 @@ zrle_encode_kernel(const unsigned char *__restrict__ bwt,
           while (temp > 0) {
             if (temp % 2 == 1) {
               out_symbols[out_base + sym_offset++] = 0;
-              atomicAdd(&s_block_hist[0], 1);
+              hist0++;
               temp = (temp - 1) / 2;
             } else {
               out_symbols[out_base + sym_offset++] = 1;
-              atomicAdd(&s_block_hist[1], 1);
+              hist1++;
               temp = (temp - 2) / 2;
             }
           }
@@ -270,15 +271,19 @@ zrle_encode_kernel(const unsigned char *__restrict__ bwt,
       while (temp > 0) {
         if (temp % 2 == 1) {
           out_symbols[out_base + sym_offset++] = 0;
-          atomicAdd(&s_block_hist[0], 1);
+          hist0++;
           temp = (temp - 1) / 2;
         } else {
           out_symbols[out_base + sym_offset++] = 1;
-          atomicAdd(&s_block_hist[1], 1);
+          hist1++;
           temp = (temp - 2) / 2;
         }
       }
     }
+    if (hist0 > 0)
+      atomicAdd(&s_block_hist[0], hist0);
+    if (hist1 > 0)
+      atomicAdd(&s_block_hist[1], hist1);
     chunk_symbol_lengths[chunk_id] = sym_offset;
   }
 
@@ -463,7 +468,7 @@ __global__ void tabled_decode_kernel(
   int *s_dec_symbol = &s_dec_mem[L];
 
   unsigned char *s_alphabets = (unsigned char *)&s_dec_mem[2 * L];
-  unsigned char *alphabet = &s_alphabets[threadIdx.x * 256];
+  unsigned char *alphabet = &s_alphabets[threadIdx.x * 260];
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
   for (int i = threadIdx.x * 4; i < L; i += blockDim.x * 4) {
@@ -537,8 +542,9 @@ __global__ void tabled_decode_kernel(
       power *= 2;
     } else {
       if (run_length > 0) {
+        unsigned char c0 = alphabet[0];
         for (int i = 0; i < run_length && out_idx < end; i++)
-          bwt[out_idx++] = alphabet[0];
+          bwt[out_idx++] = c0;
         run_length = 0;
         power = 1;
       }
@@ -558,8 +564,9 @@ __global__ void tabled_decode_kernel(
     }
   }
   if (run_length > 0) {
+    unsigned char c0 = alphabet[0];
     for (int i = 0; i < run_length && out_idx < end; i++)
-      bwt[out_idx++] = alphabet[0];
+      bwt[out_idx++] = c0;
   }
 }
 
