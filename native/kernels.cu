@@ -147,7 +147,8 @@ __global__ void sa_set_rank_kernel(const int *__restrict__ bucket_starts,
 }
 
 __global__ void sa_active_key_kernel(const int *__restrict__ rank,
-                                     const int *__restrict__ active_sa,
+                                     const int *__restrict__ active_pos,
+                                     const int *__restrict__ sa_final,
                                      uint64_t *__restrict__ keys,
                                      int *__restrict__ sa_out,
                                      int n, int m_active, int k_mod,
@@ -155,7 +156,7 @@ __global__ void sa_active_key_kernel(const int *__restrict__ rank,
   int m = blockIdx.x * blockDim.x + threadIdx.x;
   if (m >= m_active)
     return;
-  int s = active_sa[m];
+  int s = sa_final[active_pos[m]];
   int j = s + k_mod;
   if (j >= n)
     j -= n;

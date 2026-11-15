@@ -238,10 +238,6 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
                              thrust::counting_iterator<int>(0), d_bwt,
                              d_active_pos, d_primary_idx, n, stream);
 
-  t_bytes = temp_storage_bytes;
-  cub::DeviceSelect::Flagged(d_temp_storage, t_bytes, d_sa_final, d_bwt,
-                             d_active_sa, d_primary_idx, n, stream);
-
   CUDA_CHECK(cudaMemcpyAsync(host_last_rank, d_primary_idx, sizeof(int),
                              cudaMemcpyDeviceToHost, stream));
   CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -253,18 +249,16 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
   if (!sorted) {
     int *curr_pos = d_active_pos;
     int *next_pos = d_active_pos_alt;
-    int *curr_sa = d_active_sa;
-    int *next_sa = d_active_sa_alt;
 
     int k = 8;
     while (k < n) {
       int active_blocks = (m_active + 255) / 256;
 
       sa_active_key_kernel<<<active_blocks, 256, 0, stream>>>(
-          d_rank, curr_sa, d_keys_db.Current(), next_sa, n, m_active, k % n,
-          rank_bits);
+          d_rank, curr_pos, d_sa_final, d_keys_db.Current(), d_active_sa, n,
+          m_active, k % n, rank_bits);
 
-      cub::DoubleBuffer<int> active_sa_db(next_sa, curr_sa);
+      cub::DoubleBuffer<int> active_sa_db(d_active_sa, d_active_sa_alt);
       t_bytes = temp_storage_bytes;
       cub::DeviceRadixSort::SortPairs(d_temp_storage, t_bytes, d_keys_db,
                                       active_sa_db, m_active, 0, key_bits,
@@ -286,20 +280,12 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
       cub::DeviceSelect::Flagged(d_temp_storage, t_bytes, curr_pos, d_bwt,
                                  next_pos, d_primary_idx, m_active, stream);
 
-      t_bytes = temp_storage_bytes;
-      cub::DeviceSelect::Flagged(d_temp_storage, t_bytes,
-                                 active_sa_db.Current(), d_bwt,
-                                 active_sa_db.Alternate(), d_primary_idx,
-                                 m_active, stream);
-
       CUDA_CHECK(cudaMemcpyAsync(host_last_rank, d_primary_idx, sizeof(int),
                                  cudaMemcpyDeviceToHost, stream));
       CUDA_CHECK(cudaStreamSynchronize(stream));
 
       m_active = *host_last_rank;
       std::swap(curr_pos, next_pos);
-      curr_sa = active_sa_db.Alternate();
-      next_sa = active_sa_db.Current();
 
       if (m_active == 0) {
         sorted = true;
