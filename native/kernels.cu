@@ -36,10 +36,19 @@ __global__ void sa_4byte_keys_kernel(const unsigned char *__restrict__ T,
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= n)
     return;
+  int i1 = idx + 1;
+  if (i1 >= n)
+    i1 -= n;
+  int i2 = idx + 2;
+  while (i2 >= n)
+    i2 -= n;
+  int i3 = idx + 3;
+  while (i3 >= n)
+    i3 -= n;
   uint32_t c0 = (uint32_t)T[idx];
-  uint32_t c1 = (uint32_t)T[(idx + 1) % n];
-  uint32_t c2 = (uint32_t)T[(idx + 2) % n];
-  uint32_t c3 = (uint32_t)T[(idx + 3) % n];
+  uint32_t c1 = (uint32_t)T[i1];
+  uint32_t c2 = (uint32_t)T[i2];
+  uint32_t c3 = (uint32_t)T[i3];
   keys[idx] = (c0 << 24) | (c1 << 16) | (c2 << 8) | c3;
   sa[idx] = idx;
 }
@@ -61,8 +70,11 @@ __global__ void sa_key_kernel(const int *__restrict__ rank,
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= n)
     return;
+  int j = idx + k;
+  if (j >= n)
+    j -= n;
   uint64_t r1 = (uint32_t)rank[idx];
-  uint64_t r2 = (uint32_t)rank[(idx + k) % n];
+  uint64_t r2 = (uint32_t)rank[j];
   keys[idx] = (r1 << rank_shift) | r2;
   sa[idx] = idx;
 }
@@ -285,7 +297,8 @@ __global__ void tabled_encode_kernel(
   extern __shared__ unsigned char s_mem_th[];
   int *s_enc = (int *)s_mem_th;
   int *s_p = (int *)(s_mem_th + L * sizeof(int));
-  int *s_prefix_p = (int *)(s_mem_th + L * sizeof(int) + 257 * sizeof(int));
+  int *s_prefix_p = (int *)(s_mem_th + (L + 257) * sizeof(int));
+  int *s_max_x = (int *)(s_mem_th + (L + 514) * sizeof(int));
 
   // Coalesced, branch-free shared memory pre-staging
   for (int i = threadIdx.x; i < L; i += blockDim.x)
@@ -293,6 +306,7 @@ __global__ void tabled_encode_kernel(
   for (int i = threadIdx.x; i < 257; i += blockDim.x) {
     s_p[i] = p[i];
     s_prefix_p[i] = prefix_p[i];
+    s_max_x[i] = max_x[i];
   }
   __syncthreads();
 
@@ -306,7 +320,7 @@ __global__ void tabled_encode_kernel(
 
   for (int i = len - 1; i >= 0; i--) {
     unsigned short s = symbols[in_base + i];
-    int mx = max_x[s];
+    int mx = s_max_x[s];
     while (x > mx) {
       bit_buf |= ((uint64_t)(x & 1) << bit_cnt++);
       if (bit_cnt == 64) {

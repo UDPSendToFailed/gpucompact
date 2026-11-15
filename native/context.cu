@@ -225,7 +225,7 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
     int max_iter = rank_bits + 2;
     for (int iter = 0; iter < max_iter; iter++) {
       sa_key_kernel<<<blocks, 256, 0, stream>>>(d_rank, d_sa_db.Current(),
-                                                d_keys_db.Current(), n, k,
+                                                d_keys_db.Current(), n, k % n,
                                                 rank_bits);
 
       t_bytes = temp_storage_bytes;
@@ -292,31 +292,14 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
       d_hist, d_p, d_prefix_p, d_max_x, d_symbol_spread, d_enc_table,
       d_dec_table, d_dec_symbol, d_next_state, L, 257);
   CUDA_CHECK(cudaMemsetAsync(d_overflow_flag, 0, sizeof(uint32_t), stream));
-  tabled_encode_kernel<<<z_blocks, threads_comp, (L + 514) * sizeof(int),
+  CUDA_CHECK(cudaMemsetAsync(d_chunk_bit_lens, 0, num_chunks * sizeof(uint32_t), stream));
+  tabled_encode_kernel<<<z_blocks, threads_comp, (L + 771) * sizeof(int),
                          stream>>>(d_out_symbols, d_chunk_sym_lens, d_out_words,
                                    d_chunk_bit_lens, d_p, d_prefix_p, d_max_x,
                                    d_enc_table, num_chunks, mini_chunk_size,
                                    max_words, L, d_overflow_flag);
   CUDA_CHECK(cudaMemcpyAsync(host_overflow_flag, d_overflow_flag,
                              sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
-  CUDA_CHECK(cudaStreamSynchronize(stream));
-
-  if (*host_overflow_flag != 0) {
-    // Bitstream overflow detected -> Fallback to Raw Mode!
-    is_raw = 1;
-    comp_size = n;
-    std::memcpy(host_out, host_in, n);
-    CUDA_CHECK(cudaMemsetAsync(d_gpu_hash, 0, sizeof(uint64_t), stream));
-    int hash_threads = 256;
-    int hash_blocks = ((n + 7) / 8 + hash_threads - 1) / hash_threads;
-    gpu_hash_kernel<<<hash_blocks, hash_threads, 0, stream>>>(d_data,
-                                                              d_gpu_hash, n);
-    CUDA_CHECK(cudaMemcpyAsync(&gpu_hash, d_gpu_hash, sizeof(uint64_t),
-                               cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaEventRecord(e_end, stream));
-    cudaStreamSynchronize(stream);
-    return;
-  }
 
   int c_blocks = (num_chunks + 255) / 256;
   bit_to_word_kernel<<<c_blocks, 256, 0, stream>>>(
@@ -338,7 +321,8 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
   uint32_t b_len_words = total_words * 8;
   uint32_t header_total = 4 + b_len_bits + (b_len_dec * 2) + b_len_words;
 
-  if (header_total >= (uint32_t)n) {
+  if (*host_overflow_flag != 0 || header_total >= (uint32_t)n) {
+    // Bitstream overflow or expansion detected -> Fallback to Raw Mode!
     is_raw = 1;
     comp_size = n;
     std::memcpy(host_out, host_in, n);
