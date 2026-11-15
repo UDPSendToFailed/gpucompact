@@ -36,8 +36,11 @@
         Copy,
         Check,
         Loader2,
+        Sliders,
     } from "lucide-svelte";
+    import CustomConfigModal from "./CustomConfigModal.svelte";
 
+    let customModalRef: CustomConfigModal | null = $state(null);
     let benchTargets = $state<string[]>([]);
     let selectedProfile = $state<ProfilePreset>("balanced");
     let isRunning = $state<boolean>(false);
@@ -49,33 +52,33 @@
 
     const profiles = [
         {
-            id: "balanced" as ProfilePreset,
-            name: "Balanced",
-            desc: "4 MB / 512 B Mini",
+            id: "best_speed" as ProfilePreset,
+            name: "Best Speed",
+            desc: "4 MB / 256 B / L=512",
             icon: Zap,
         },
         {
             id: "speed" as ProfilePreset,
             name: "Speed",
-            desc: "4 MB / 512 B Mini",
+            desc: "4 MB / 512 B / L=512",
             icon: Sparkles,
+        },
+        {
+            id: "balanced" as ProfilePreset,
+            name: "Balanced",
+            desc: "4 MB / 512 B / L=1024",
+            icon: Zap,
         },
         {
             id: "ratio" as ProfilePreset,
             name: "Ratio",
-            desc: "4 MB / 2 KB Mini",
+            desc: "4 MB / 2 KB / L=2048",
             icon: Shield,
         },
         {
-            id: "best_speed" as ProfilePreset,
-            name: "Best speed",
-            desc: "4 MB / 256 B Mini",
-            icon: Zap,
-        },
-        {
             id: "best_ratio" as ProfilePreset,
-            name: "Best ratio",
-            desc: "8 MB / 8 KB Mini",
+            name: "Best Ratio",
+            desc: "8 MB / 8 KB / L=2048",
             icon: Layers,
         },
     ];
@@ -322,7 +325,7 @@
                                 class="text-xs font-semibold text-zinc-400 uppercase tracking-wider px-1"
                                 >Profile Preset</span
                             >
-                            <div class="grid grid-cols-5 gap-2.5">
+                            <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
                                 {#each profiles as p}
                                     {@const Icon = p.icon}
                                     <button
@@ -351,6 +354,37 @@
                                         </p>
                                     </button>
                                 {/each}
+
+                                <button
+                                    onclick={() => {
+                                        selectedProfile = "custom";
+                                        customModalRef?.openModal();
+                                    }}
+                                    class="fluent-panel p-3 text-left transition-all cursor-pointer border-white/5 {selectedProfile ===
+                                    'custom'
+                                        ? 'border-indigo-500/50 bg-indigo-500/10 shadow-lg shadow-indigo-500/10'
+                                        : 'hover:bg-white/5'}"
+                                >
+                                    <div
+                                        class="flex items-center justify-between mb-1"
+                                    >
+                                        <span
+                                            class="text-xs font-semibold text-white truncate"
+                                            >Custom...</span
+                                        >
+                                        <Sliders
+                                            size={13}
+                                            class={selectedProfile === "custom"
+                                                ? "text-indigo-400"
+                                                : "text-zinc-500"}
+                                        />
+                                    </div>
+                                    <p class="text-[10px] text-zinc-400">
+                                        {appState.customConfig.macro_mb} MB / {appState
+                                            .customConfig.mini_size} B / L={appState
+                                            .customConfig.l_state}
+                                    </p>
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -601,3 +635,5 @@
         </div>
     </div>
 {/if}
+
+<CustomConfigModal bind:this={customModalRef} />

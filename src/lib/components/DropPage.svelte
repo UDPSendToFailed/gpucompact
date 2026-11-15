@@ -40,33 +40,33 @@
 
   const profiles = [
     {
-      id: "balanced" as ProfilePreset,
-      name: "Balanced",
-      desc: "4 MB Macro / 512 B Mini",
+      id: "best_speed" as ProfilePreset,
+      name: "Best Speed",
+      desc: "4 MB / 256 B / L=512",
       icon: Zap,
     },
     {
       id: "speed" as ProfilePreset,
       name: "Speed",
-      desc: "4 MB Macro / 512 B Mini",
+      desc: "4 MB / 512 B / L=512",
       icon: Sparkles,
+    },
+    {
+      id: "balanced" as ProfilePreset,
+      name: "Balanced",
+      desc: "4 MB / 512 B / L=1024",
+      icon: Zap,
     },
     {
       id: "ratio" as ProfilePreset,
       name: "Ratio",
-      desc: "4 MB Macro / 2 KB Mini",
+      desc: "4 MB / 2 KB / L=2048",
       icon: Shield,
     },
     {
-      id: "best_speed" as ProfilePreset,
-      name: "Best speed",
-      desc: "4 MB Macro / 256 B Mini",
-      icon: Zap,
-    },
-    {
       id: "best_ratio" as ProfilePreset,
-      name: "Best ratio",
-      desc: "8 MB Macro / 8 KB Mini",
+      name: "Best Ratio",
+      desc: "8 MB / 8 KB / L=2048",
       icon: Layers,
     },
   ];
