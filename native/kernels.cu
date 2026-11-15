@@ -333,38 +333,44 @@ __global__ void tabled_encode_kernel(
       out_base = chunk_id * max_words;
   uint64_t bit_buf = 0;
   int bit_cnt = 0, word_off = 0, x = L;
+  int clz_L = __clz(L);
 
   for (int i = len - 1; i >= 0; i--) {
     unsigned short s = symbols[in_base + i];
     int mx = s_max_x[s];
-    while (x > mx) {
-      bit_buf |= ((uint64_t)(x & 1) << bit_cnt++);
-      if (bit_cnt == 64) {
+    int k = __clz(mx) - clz_L;
+    k += ((x >> k) > mx);
+    if (k > 0) {
+      uint32_t bits = (uint32_t)x & ((1u << k) - 1u);
+      x >>= k;
+      bit_buf |= ((uint64_t)bits << bit_cnt);
+      bit_cnt += k;
+      if (bit_cnt >= 64) {
         if (word_off >= max_words) {
           atomicExch(d_overflow_flag, 1u);
           return;
         }
         out_words[out_base + word_off++] = bit_buf;
-        bit_cnt = 0;
-        bit_buf = 0;
+        bit_cnt -= 64;
+        bit_buf = (bit_cnt > 0) ? ((uint64_t)bits >> (k - bit_cnt)) : 0ULL;
       }
-      x >>= 1;
     }
     x = s_enc[s_prefix_p[s] + x - s_p[s]];
   }
 
-  int state_bits = 32 - __clz(L);
-  for (int b = 0; b < state_bits; b++) {
-    bit_buf |= ((uint64_t)((x >> b) & 1) << bit_cnt++);
-    if (bit_cnt == 64) {
-      if (word_off >= max_words) {
-        atomicExch(d_overflow_flag, 1u);
-        return;
-      }
-      out_words[out_base + word_off++] = bit_buf;
-      bit_cnt = 0;
-      bit_buf = 0;
+  int state_bits = 32 - clz_L;
+  uint32_t final_bits = (uint32_t)x & ((1u << state_bits) - 1u);
+  bit_buf |= ((uint64_t)final_bits << bit_cnt);
+  bit_cnt += state_bits;
+  if (bit_cnt >= 64) {
+    if (word_off >= max_words) {
+      atomicExch(d_overflow_flag, 1u);
+      return;
     }
+    out_words[out_base + word_off++] = bit_buf;
+    bit_cnt -= 64;
+    bit_buf =
+        (bit_cnt > 0) ? ((uint64_t)final_bits >> (state_bits - bit_cnt)) : 0ULL;
   }
   if (bit_cnt > 0) {
     if (word_off >= max_words) {
@@ -431,25 +437,29 @@ __global__ void tabled_decode_kernel(
 
   int word_base = word_offsets[chunk_id];
   int current_bit_idx = (int)bit_lengths[chunk_id] - 1;
+  int clz_L = __clz(L);
+  int state_bits = 32 - clz_L;
+  int cached_w_idx = (current_bit_idx >= 0) ? (current_bit_idx >> 6) : -1;
+  uint64_t cached_word =
+      (cached_w_idx >= 0) ? in_words[word_base + cached_w_idx] : 0ULL;
+
   int x = 0;
-  int state_bits = 32 - __clz(L);
-
-  for (int b = state_bits - 1; b >= 0; b--) {
-    unsigned int bit = 0;
-    if (current_bit_idx >= 0) {
-      bit = (unsigned int)((in_words[word_base + (current_bit_idx >> 6)] >>
-                            (current_bit_idx & 63)) &
-                           1ULL);
-      current_bit_idx--;
+  if (current_bit_idx >= state_bits - 1) {
+    int low_bit = current_bit_idx - state_bits + 1;
+    int w_idx = low_bit >> 6;
+    int b_off = low_bit & 63;
+    uint64_t w1 = cached_word;
+    if (w_idx != cached_w_idx) {
+      cached_word = in_words[word_base + w_idx];
+      cached_w_idx = w_idx;
     }
-    x |= (bit << b);
-  }
-
-  int out_idx = start, run_length = 0, power = 1;
-  while (out_idx + run_length < end) {
-    int s = s_dec_symbol[x - L];
-    x = s_dec_table[x - L];
-    while (x < L) {
+    uint64_t combined = (b_off + state_bits <= 64)
+                            ? (cached_word >> b_off)
+                            : ((cached_word >> b_off) | (w1 << (64 - b_off)));
+    x = (int)((uint32_t)combined & ((1u << state_bits) - 1u));
+    current_bit_idx -= state_bits;
+  } else {
+    for (int b = state_bits - 1; b >= 0; b--) {
       unsigned int bit = 0;
       if (current_bit_idx >= 0) {
         bit = (unsigned int)((in_words[word_base + (current_bit_idx >> 6)] >>
@@ -457,7 +467,40 @@ __global__ void tabled_decode_kernel(
                              1ULL);
         current_bit_idx--;
       }
-      x = (x << 1) | bit;
+      x |= (bit << b);
+    }
+  }
+
+  int out_idx = start, run_length = 0, power = 1;
+  while (out_idx + run_length < end) {
+    int s = s_dec_symbol[x - L];
+    x = s_dec_table[x - L];
+    if (x < L) {
+      int k = __clz(x) - clz_L;
+      if (current_bit_idx >= k - 1) {
+        int low_bit = current_bit_idx - k + 1;
+        int w_idx = low_bit >> 6;
+        int b_off = low_bit & 63;
+        uint64_t w1 = cached_word;
+        if (w_idx != cached_w_idx) {
+          cached_word = in_words[word_base + w_idx];
+          cached_w_idx = w_idx;
+        }
+        uint64_t combined =
+            (b_off + k <= 64) ? (cached_word >> b_off)
+                              : ((cached_word >> b_off) | (w1 << (64 - b_off)));
+        uint32_t bits = (uint32_t)combined & ((1u << k) - 1u);
+        x = (x << k) | (int)bits;
+        current_bit_idx -= k;
+      } else if (current_bit_idx >= 0) {
+        int avail = current_bit_idx + 1;
+        uint32_t bits =
+            (uint32_t)(in_words[word_base] & ((1ULL << avail) - 1ULL));
+        x = ((x << avail) | (int)bits) << (k - avail);
+        current_bit_idx = -1;
+      } else {
+        x <<= k;
+      }
     }
     if (s == 0) {
       run_length += power * 1;
