@@ -144,64 +144,89 @@ zrle_encode_kernel(const unsigned char *__restrict__ bwt,
   if (start < total_size) {
     extern __shared__ unsigned char s_alphabet[];
     unsigned char *alphabet = &s_alphabet[threadIdx.x * 260];
-    for (int i = 0; i < 256; i++) {
-      alphabet[i] = (unsigned char)i;
+    uint32_t *alpha32 = reinterpret_cast<uint32_t *>(alphabet);
+    for (uint32_t w = 0; w < 64; w++) {
+      alpha32[w] = 0x03020100u + w * 0x04040404u;
     }
+    uint32_t w0 = 0x03020100u;
 
     int zero_run = 0, sym_offset = 0, out_base = chunk_id * chunk_size;
     uint32_t hist0 = 0, hist1 = 0;
     for (int i = start; i < end; i++) {
-      unsigned char c = bwt[i], idx = 0;
-      for (int j = 0; j < 256; j++) {
-        if (alphabet[j] == c) {
-          idx = (unsigned char)j;
-          break;
-        }
-      }
-
-      if (idx == 0) {
+      unsigned char c = bwt[i];
+      if ((unsigned char)w0 == c) {
         zero_run++;
-      } else {
-        if (zero_run > 0) {
-          int temp = zero_run;
-          while (temp > 0) {
-            if (temp % 2 == 1) {
-              out_symbols[out_base + sym_offset++] = 0;
-              hist0++;
-              temp = (temp - 1) / 2;
-            } else {
-              out_symbols[out_base + sym_offset++] = 1;
-              hist1++;
-              temp = (temp - 2) / 2;
-            }
-          }
-          zero_run = 0;
-        }
-        out_symbols[out_base + sym_offset++] = idx + 1;
-        atomicAdd(&s_block_hist[idx + 1], 1);
+        continue;
       }
 
-      // Move-To-Front (MTF) update
-      if (idx == 1) {
-        alphabet[1] = alphabet[0];
-        alphabet[0] = c;
-      } else if (idx > 1) {
-        for (int j = idx; j > 0; j--)
-          alphabet[j] = alphabet[j - 1];
-        alphabet[0] = c;
+      if (zero_run > 0) {
+        int temp = zero_run;
+        while (temp > 0) {
+          if (temp & 1) {
+            out_symbols[out_base + sym_offset++] = 0;
+            hist0++;
+            temp = (temp - 1) >> 1;
+          } else {
+            out_symbols[out_base + sym_offset++] = 1;
+            hist1++;
+            temp = (temp - 2) >> 1;
+          }
+        }
+        zero_run = 0;
       }
+
+      uint32_t bcast = 0x01010101u * (uint32_t)c;
+      uint32_t x0 = w0 ^ bcast;
+      uint32_t mask = (x0 - 0x01010101u) & ~x0 & 0x80808080u;
+      unsigned int idx = 0;
+
+      if (mask != 0) {
+        idx = (unsigned int)((__ffs(mask) - 1) >> 3);
+        uint32_t low_mask = (1u << (idx * 8)) - 1u;
+        uint32_t mod_mask = (low_mask << 8) | 0xFFu;
+        w0 = (w0 & ~mod_mask) | ((w0 & low_mask) << 8) | (uint32_t)c;
+        alpha32[0] = w0;
+      } else {
+        int w_idx = 1;
+        uint32_t w = 0;
+        for (; w_idx < 64; w_idx++) {
+          w = alpha32[w_idx];
+          uint32_t xw = w ^ bcast;
+          mask = (xw - 0x01010101u) & ~xw & 0x80808080u;
+          if (mask != 0)
+            break;
+        }
+        unsigned int lane = (unsigned int)((__ffs(mask) - 1) >> 3);
+        idx = (unsigned int)(w_idx << 2) | lane;
+
+        uint32_t low_mask = (1u << (lane * 8)) - 1u;
+        uint32_t mod_mask = (low_mask << 8) | 0xFFu;
+        uint32_t prev = (w_idx == 1) ? w0 : alpha32[w_idx - 1];
+        alpha32[w_idx] =
+            (w & ~mod_mask) | ((w & low_mask) << 8) | (prev >> 24);
+        for (int k = w_idx - 1; k >= 1; k--) {
+          uint32_t p = (k == 1) ? w0 : alpha32[k - 1];
+          alpha32[k] = __funnelshift_l(p, prev, 8);
+          prev = p;
+        }
+        w0 = (w0 << 8) | (uint32_t)c;
+        alpha32[0] = w0;
+      }
+
+      out_symbols[out_base + sym_offset++] = (unsigned short)(idx + 1);
+      atomicAdd(&s_block_hist[idx + 1], 1);
     }
     if (zero_run > 0) {
       int temp = zero_run;
       while (temp > 0) {
-        if (temp % 2 == 1) {
+        if (temp & 1) {
           out_symbols[out_base + sym_offset++] = 0;
           hist0++;
-          temp = (temp - 1) / 2;
+          temp = (temp - 1) >> 1;
         } else {
           out_symbols[out_base + sym_offset++] = 1;
           hist1++;
-          temp = (temp - 2) / 2;
+          temp = (temp - 2) >> 1;
         }
       }
     }
@@ -424,8 +449,10 @@ __global__ void tabled_decode_kernel(
   __syncthreads();
 #endif
 
-  for (int i = 0; i < 256; i++)
-    alphabet[i] = (unsigned char)i;
+  uint32_t *alpha32 = reinterpret_cast<uint32_t *>(alphabet);
+  for (uint32_t w = 0; w < 64; w++)
+    alpha32[w] = 0x03020100u + w * 0x04040404u;
+  uint32_t w0 = 0x03020100u;
 
   int chunk_id = blockIdx.x * blockDim.x + threadIdx.x;
   int start = chunk_id * chunk_size;
@@ -503,36 +530,54 @@ __global__ void tabled_decode_kernel(
       }
     }
     if (s == 0) {
-      run_length += power * 1;
-      power *= 2;
+      run_length += power;
+      power <<= 1;
     } else if (s == 1) {
-      run_length += power * 2;
-      power *= 2;
+      run_length += (power << 1);
+      power <<= 1;
     } else {
       if (run_length > 0) {
-        unsigned char c0 = alphabet[0];
+        unsigned char c0 = (unsigned char)w0;
         for (int i = 0; i < run_length && out_idx < end; i++)
           bwt[out_idx++] = c0;
         run_length = 0;
         power = 1;
       }
       if (out_idx < end) {
-        unsigned int idx = s - 1;
-        unsigned char c = alphabet[idx];
-        bwt[out_idx++] = c;
-        if (idx == 1) {
-          alphabet[1] = alphabet[0];
-          alphabet[0] = c;
-        } else if (idx > 1) {
-          for (int j = idx; j > 0; j--)
-            alphabet[j] = alphabet[j - 1];
-          alphabet[0] = c;
+        unsigned int idx = (unsigned int)(s - 1);
+        unsigned char c;
+        if (idx < 4) {
+          c = (unsigned char)(w0 >> (idx * 8));
+          if (idx > 0) {
+            uint32_t low_mask = (1u << (idx * 8)) - 1u;
+            uint32_t mod_mask = (low_mask << 8) | 0xFFu;
+            w0 = (w0 & ~mod_mask) | ((w0 & low_mask) << 8) | (uint32_t)c;
+            alpha32[0] = w0;
+          }
+        } else {
+          int w_idx = (int)(idx >> 2);
+          unsigned int lane = idx & 3u;
+          uint32_t w = alpha32[w_idx];
+          c = (unsigned char)(w >> (lane * 8));
+          uint32_t low_mask = (1u << (lane * 8)) - 1u;
+          uint32_t mod_mask = (low_mask << 8) | 0xFFu;
+          uint32_t prev = (w_idx == 1) ? w0 : alpha32[w_idx - 1];
+          alpha32[w_idx] =
+              (w & ~mod_mask) | ((w & low_mask) << 8) | (prev >> 24);
+          for (int k = w_idx - 1; k >= 1; k--) {
+            uint32_t p = (k == 1) ? w0 : alpha32[k - 1];
+            alpha32[k] = __funnelshift_l(p, prev, 8);
+            prev = p;
+          }
+          w0 = (w0 << 8) | (uint32_t)c;
+          alpha32[0] = w0;
         }
+        bwt[out_idx++] = c;
       }
     }
   }
   if (run_length > 0) {
-    unsigned char c0 = alphabet[0];
+    unsigned char c0 = (unsigned char)w0;
     for (int i = 0; i < run_length && out_idx < end; i++)
       bwt[out_idx++] = c0;
   }
