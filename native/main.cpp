@@ -42,7 +42,7 @@ namespace fs = std::filesystem;
 static bool is_power_of_two(int n) { return n > 0 && (n & (n - 1)) == 0; }
 
 void warmup_pipeline(const LaunchConfig &config) {
-  std::cout << "gpucompact 1.1.0 (CUDA)" << std::endl;
+  std::cout << "gpucompact 1.2.0 (CUDA)" << std::endl;
   std::cout << "Initializing GPU context..." << std::flush;
 
   int dummy_n = std::min(1024 * 1024, config.macro_mb * 1024 * 1024);
@@ -315,7 +315,7 @@ int main(int argc, char **argv) {
 
     if (input_paths.empty() && bench_path.empty()) {
       std::cout
-          << "gpucompact 1.1.0 (CUDA)\n\n"
+          << "gpucompact 1.2.0 (CUDA)\n\n"
           << "Usage:\n"
           << "  gpucompact -c -i <input...> [-o archive.gcmp] [--profile "
              "<preset>]\n"
