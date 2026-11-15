@@ -245,6 +245,23 @@ zrle_encode_kernel(const unsigned char *__restrict__ bwt,
   }
 }
 
+__device__ __forceinline__ int count_tans_prog(int x_start, int cnt,
+                                               int dec_idx, int L) {
+  int total = 0;
+#pragma unroll
+  for (int q = 0; q < 4; q++) {
+    int Lq = q * L - x_start;
+    int Rq = Lq + dec_idx;
+    int fL = (Lq <= 0) ? 0 : (int)((uint32_t)(Lq + 5) / 6u);
+    int fR = (Rq <= 0) ? 0 : (int)((uint32_t)(Rq + 5) / 6u);
+    int lo = (fL < cnt) ? fL : cnt;
+    int hi = (fR < cnt) ? fR : cnt;
+    if (hi > lo)
+      total += hi - lo;
+  }
+  return total;
+}
+
 __global__ void build_tans_all_kernel(
     const unsigned int *__restrict__ hist, int *__restrict__ p_out,
     int *__restrict__ prefix_p_out, int *__restrict__ max_x,
@@ -257,6 +274,7 @@ __global__ void build_tans_all_kernel(
 
   __shared__ unsigned int s_hist[257];
   __shared__ int s_p[257];
+  __shared__ int s_prefix_p[258];
   s_hist[tid] = hist[tid];
   s_p[tid] = (hist[tid] > 0) ? 1 : 0;
   __syncthreads();
@@ -298,31 +316,41 @@ __global__ void build_tans_all_kernel(
   for (int i = 0; i < tid; i++)
     prefix += s_p[i];
   prefix_p_out[tid] = prefix;
-
-  int step = (L / 2) + 3;
-  for (int k = 0; k < s_p[tid]; k++) {
-    int spread_idx = ((prefix + k) * step) % L;
-    if (spread_idx >= 0 && spread_idx < L)
-      symbol_spread[spread_idx] = tid;
-  }
+  s_prefix_p[tid] = prefix;
+  if (tid == alphabet_size - 1)
+    s_prefix_p[alphabet_size] = L;
   __syncthreads();
 
-  if (tid == 0) {
-    for (int i = 0; i < alphabet_size; i++)
-      next_state[i] = s_p[i];
-    for (int x = L; x < 2 * L; x++) {
-      int s = symbol_spread[x - L];
-      int dec_idx = x - L;
-      if (dec_idx >= 0 && dec_idx < L) {
-        decoding_symbol[dec_idx] = s;
-        int state = next_state[s];
-        decoding_table[dec_idx] = state;
-        int enc_idx = prefix_p_out[s] + state - s_p[s];
-        if (enc_idx >= 0 && enc_idx < L)
-          encoding_table[enc_idx] = x;
-        next_state[s] = state + 1;
-      }
+  int step = (L / 2) + 3;
+  int mask_L = L - 1;
+  int prev_s = 0;
+  for (int pos = tid; pos < L; pos += alphabet_size) {
+    int lo = prev_s, hi = alphabet_size - 1;
+    while (lo < hi) {
+      int mid = (lo + hi + 1) >> 1;
+      if (s_prefix_p[mid] <= pos)
+        lo = mid;
+      else
+        hi = mid - 1;
     }
+    int s = lo;
+    prev_s = s;
+    int cnt = s_p[s];
+    int pref = s_prefix_p[s];
+    int dec_idx = (pos * step) & mask_L;
+    int rank = 0;
+    if (cnt > 1) {
+      int even_cnt = (cnt + 1) >> 1;
+      int odd_cnt = cnt >> 1;
+      int x0 = (pref * step) & mask_L;
+      int x1 = ((pref + 1) * step) & mask_L;
+      rank = count_tans_prog(x0, even_cnt, dec_idx, L) +
+             count_tans_prog(x1, odd_cnt, dec_idx, L);
+    }
+    int state = cnt + rank;
+    decoding_symbol[dec_idx] = s;
+    decoding_table[dec_idx] = state;
+    encoding_table[pref + rank] = dec_idx + L;
   }
 }
 
