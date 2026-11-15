@@ -535,6 +535,79 @@ __global__ void build_lf_kernel(const int *__restrict__ F_to_L,
   }
 }
 
+__global__ void bwt_block_hist_kernel(const unsigned char *__restrict__ bwt,
+                                      uint32_t *__restrict__ block_hist,
+                                      int n, int num_blocks) {
+  __shared__ uint32_t s_hist[256];
+  int tid = threadIdx.x;
+  s_hist[tid] = 0;
+  __syncthreads();
+
+  int start = blockIdx.x * 4096;
+  int end = start + 4096;
+  if (end > n)
+    end = n;
+
+  for (int i = start + tid; i < end; i += 256) {
+    atomicAdd(&s_hist[bwt[i]], 1U);
+  }
+  __syncthreads();
+
+  block_hist[tid * num_blocks + blockIdx.x] = s_hist[tid];
+}
+
+__global__ void bwt_scatter_lf_kernel(const unsigned char *__restrict__ bwt,
+                                      const uint32_t *__restrict__ block_offsets,
+                                      int *__restrict__ LF,
+                                      int n, int num_blocks) {
+  __shared__ uint32_t s_base[256];
+  __shared__ uint16_t s_warp_hist[8][256];
+
+  int tid = threadIdx.x;
+  int warp_id = tid >> 5;
+  int lane = tid & 31;
+
+  s_base[tid] = block_offsets[tid * num_blocks + blockIdx.x];
+  for (int w = 0; w < 8; w++) {
+    s_warp_hist[w][tid] = 0;
+  }
+  __syncthreads();
+
+  int start = blockIdx.x * 4096;
+  for (int step = 0; step < 16; step++) {
+    int pos = start + step * 256 + tid;
+    bool valid = (pos < n);
+    uint32_t key = valid ? (uint32_t)bwt[pos] : 256U;
+    uint32_t mask = __match_any_sync(0xFFFFFFFFU, key);
+    int warp_rank = 0;
+
+    if (valid) {
+      warp_rank = __popc(mask & ((1U << lane) - 1));
+      if (lane == (__ffs(mask) - 1)) {
+        s_warp_hist[warp_id][key] = (uint16_t)__popc(mask);
+      }
+    }
+    __syncthreads();
+
+    if (valid) {
+      uint32_t prefix = s_base[key] + (uint32_t)warp_rank;
+      for (int w = 0; w < warp_id; w++) {
+        prefix += s_warp_hist[w][key];
+      }
+      LF[pos] = (int)prefix;
+    }
+    __syncthreads();
+
+    uint32_t step_sum = 0;
+    for (int w = 0; w < 8; w++) {
+      step_sum += s_warp_hist[w][tid];
+      s_warp_hist[w][tid] = 0;
+    }
+    s_base[tid] += step_sum;
+    __syncthreads();
+  }
+}
+
 __global__ void jump_init_vec_kernel(const int *__restrict__ LF,
                                      const int *__restrict__ primary_indices,
                                      const uint64_t *__restrict__ chunk_offsets,

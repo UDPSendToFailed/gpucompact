@@ -124,6 +124,15 @@ __global__ void fill_key_kernel(const uint64_t *__restrict__ offsets,
 __global__ void build_lf_kernel(const int *__restrict__ F_to_L,
                                 int *__restrict__ LF, int n);
 
+__global__ void bwt_block_hist_kernel(const unsigned char *__restrict__ bwt,
+                                      uint32_t *__restrict__ block_hist,
+                                      int n, int num_blocks);
+
+__global__ void bwt_scatter_lf_kernel(const unsigned char *__restrict__ bwt,
+                                      const uint32_t *__restrict__ block_offsets,
+                                      int *__restrict__ LF,
+                                      int n, int num_blocks);
+
 __global__ void jump_init_vec_kernel(const int *__restrict__ LF,
                                      const int *__restrict__ primary_indices,
                                      const uint64_t *__restrict__ chunk_offsets,

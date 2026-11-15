@@ -489,24 +489,19 @@ DecompressionContext::DecompressionContext(int macro_bytes, int mini_bytes,
     CUDA_CHECK(cudaMemcpyAsync(d_primary_idx, host_primary_idx, sizeof(int),
                                cudaMemcpyHostToDevice, stream));
 
-    int rank_bits = (int)std::ceil(std::log2((double)macro_size));
-    int key_bits = std::min(64, 8 + rank_bits);
+    int hist_blocks = (macro_size + 4095) / 4096;
+    uint32_t *d_block_hist = reinterpret_cast<uint32_t *>(d_keys);
+    uint32_t *d_block_offsets = reinterpret_cast<uint32_t *>(d_keys_alt);
 
-    dim3 grid_k(blocks_u, 1);
-    fill_key_kernel<<<grid_k, 256, 0, stream>>>(d_offsets, d_sizes, d_bwt,
-                                                d_keys, 1, rank_bits);
-    fill_sequence_kernel<<<blocks_u, 256, 0, stream>>>(
-        reinterpret_cast<int *>(d_JD_in), macro_size);
+    bwt_block_hist_kernel<<<hist_blocks, 256, 0, stream>>>(
+        d_bwt, d_block_hist, macro_size, hist_blocks);
 
-    cub::DoubleBuffer<uint64_t> keys_db(d_keys, d_keys_alt);
-    cub::DoubleBuffer<int> f_to_l_db(reinterpret_cast<int *>(d_JD_in),
-                                     reinterpret_cast<int *>(d_JD_out));
     size_t t_bytes = temp_storage_bytes;
-    cub::DeviceRadixSort::SortPairs(d_temp_storage, t_bytes, keys_db, f_to_l_db,
-                                    macro_size, 0, key_bits, stream);
+    cub::DeviceScan::ExclusiveSum(d_temp_storage, t_bytes, d_block_hist,
+                                  d_block_offsets, 256 * hist_blocks, stream);
 
-    build_lf_kernel<<<blocks_u, 256, 0, stream>>>(f_to_l_db.Current(),
-                                                  d_global_LF, macro_size);
+    bwt_scatter_lf_kernel<<<hist_blocks, 256, 0, stream>>>(
+        d_bwt, d_block_offsets, d_global_LF, macro_size, hist_blocks);
 
     dim3 grid_p(blocks_u, 1);
     dim3 block_p(256, 1);
@@ -681,25 +676,20 @@ bool DecompressionContext::decompress_chunk(int threads_decomp,
       CUDA_CHECK(cudaMemcpyAsync(d_primary_idx, host_primary_idx, sizeof(int),
                                  cudaMemcpyHostToDevice, stream));
 
-      int rank_bits = (int)std::ceil(std::log2((double)uncomp_size));
-      int key_bits = std::min(64, 8 + rank_bits);
       int blocks_u = (uncomp_size + 255) / 256;
+      int hist_blocks = (uncomp_size + 4095) / 4096;
+      uint32_t *d_block_hist = reinterpret_cast<uint32_t *>(d_keys);
+      uint32_t *d_block_offsets = reinterpret_cast<uint32_t *>(d_keys_alt);
 
-      dim3 grid_k(blocks_u, 1);
-      fill_key_kernel<<<grid_k, 256, 0, stream>>>(d_offsets, d_sizes, d_bwt,
-                                                  d_keys, 1, rank_bits);
-      fill_sequence_kernel<<<blocks_u, 256, 0, stream>>>(
-          reinterpret_cast<int *>(d_JD_in), uncomp_size);
+      bwt_block_hist_kernel<<<hist_blocks, 256, 0, stream>>>(
+          d_bwt, d_block_hist, uncomp_size, hist_blocks);
 
-      cub::DoubleBuffer<uint64_t> keys_db(d_keys, d_keys_alt);
-      cub::DoubleBuffer<int> f_to_l_db(reinterpret_cast<int *>(d_JD_in),
-                                       reinterpret_cast<int *>(d_JD_out));
       size_t t_bytes = temp_storage_bytes;
-      cub::DeviceRadixSort::SortPairs(d_temp_storage, t_bytes, keys_db,
-                                      f_to_l_db, uncomp_size, 0, key_bits, stream);
+      cub::DeviceScan::ExclusiveSum(d_temp_storage, t_bytes, d_block_hist,
+                                    d_block_offsets, 256 * hist_blocks, stream);
 
-      build_lf_kernel<<<blocks_u, 256, 0, stream>>>(f_to_l_db.Current(),
-                                                    d_global_LF, uncomp_size);
+      bwt_scatter_lf_kernel<<<hist_blocks, 256, 0, stream>>>(
+          d_bwt, d_block_offsets, d_global_LF, uncomp_size, hist_blocks);
 
       dim3 grid_p(blocks_u, 1);
       dim3 block_p(256, 1);
