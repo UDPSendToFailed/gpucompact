@@ -130,37 +130,46 @@
           </div>
         </div>
 
-        <!-- Worker Threads -->
+        <!-- CUDA Block Threads -->
         <div class="fluent-panel p-3.5 space-y-3">
           <div class="flex items-center space-x-2 text-zinc-200 font-semibold font-sans">
             <Cpu size={14} class="text-indigo-400" />
-            <span>Worker Threads</span>
+            <span>CUDA Block Threads</span>
           </div>
 
-          <div class="grid grid-cols-2 gap-4 font-sans">
-            <div>
-              <label for="threads-comp" class="block text-[11px] text-zinc-400 mb-1">Compression Threads: <strong class="text-white font-mono">{appState.customConfig.threads_comp}</strong></label>
-              <input 
-                id="threads-comp"
-                type="range" 
-                min="1" 
-                max="16" 
-                bind:value={appState.customConfig.threads_comp}
-                class="w-full accent-indigo-500"
-              />
+          <div class="grid grid-cols-2 gap-4">
+            <div class="space-y-1.5">
+              <div class="flex items-center justify-between text-[11px] font-sans">
+                <span class="text-zinc-400">Compression Block</span>
+                <span class="text-indigo-400 font-bold font-mono">{appState.customConfig.threads_comp}</span>
+              </div>
+              <div class="grid grid-cols-3 gap-1.5">
+                {#each [32, 64, 128] as tc}
+                  <button
+                    onclick={() => appState.customConfig.threads_comp = tc}
+                    class="py-1.5 rounded-lg text-center border text-[11px] transition-all cursor-pointer {appState.customConfig.threads_comp === tc ? 'bg-indigo-600 text-white border-indigo-500 font-bold' : 'bg-black/40 text-zinc-400 border-white/5 hover:bg-white/5'}"
+                  >
+                    {tc}
+                  </button>
+                {/each}
+              </div>
             </div>
 
-            <div>
-              <label for="threads-decomp" class="block text-[11px] text-zinc-400 mb-1">Decompression Threads: <strong class="text-white font-mono">{appState.customConfig.threads_decomp}</strong></label>
-              <input 
-                id="threads-decomp"
-                type="range" 
-                min="16" 
-                max="128" 
-                step="8"
-                bind:value={appState.customConfig.threads_decomp}
-                class="w-full accent-indigo-500"
-              />
+            <div class="space-y-1.5">
+              <div class="flex items-center justify-between text-[11px] font-sans">
+                <span class="text-zinc-400">Decompression Block</span>
+                <span class="text-indigo-400 font-bold font-mono">{appState.customConfig.threads_decomp}</span>
+              </div>
+              <div class="grid grid-cols-3 gap-1.5">
+                {#each [32, 64, 128] as td}
+                  <button
+                    onclick={() => appState.customConfig.threads_decomp = td}
+                    class="py-1.5 rounded-lg text-center border text-[11px] transition-all cursor-pointer {appState.customConfig.threads_decomp === td ? 'bg-indigo-600 text-white border-indigo-500 font-bold' : 'bg-black/40 text-zinc-400 border-white/5 hover:bg-white/5'}"
+                  >
+                    {td}
+                  </button>
+                {/each}
+              </div>
             </div>
           </div>
         </div>

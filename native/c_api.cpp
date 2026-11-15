@@ -33,13 +33,25 @@
 
 namespace fs = std::filesystem;
 
+static int normalize_warp_threads(int t, int default_threads) {
+  if (t <= 0)
+    return default_threads;
+  int warps = (t + 31) / 32;
+  int aligned = warps * 32;
+  if (aligned < 32)
+    aligned = 32;
+  if (aligned > 256)
+    aligned = 256;
+  return aligned;
+}
+
 static LaunchConfig to_launch_config(CLaunchConfig c) {
   LaunchConfig config;
   config.macro_mb = c.macro_mb > 0 ? c.macro_mb : 4;
-  config.mini_size = c.mini_size > 0 ? c.mini_size : 1024;
-  config.L = c.L > 0 ? c.L : 2048;
-  config.threads_comp = c.threads_comp > 0 ? c.threads_comp : 6;
-  config.threads_decomp = c.threads_decomp > 0 ? c.threads_decomp : 56;
+  config.mini_size = c.mini_size > 0 ? c.mini_size : 512;
+  config.L = c.L > 0 ? c.L : 1024;
+  config.threads_comp = normalize_warp_threads(c.threads_comp, 32);
+  config.threads_decomp = normalize_warp_threads(c.threads_decomp, 64);
   return config;
 }
 

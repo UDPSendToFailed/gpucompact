@@ -550,7 +550,8 @@ def main():
                     ("threads_decomp", ctypes.c_int),
                 ]
             
-            cfg = CLaunchConfig(macro_mb=4, mini_size=1024, L=2048, threads_comp=6, threads_decomp=56)
+            cfg = CLaunchConfig(macro_mb=4, mini_size=512, L=1024, threads_comp=32, threads_decomp=64)
+            legacy_cfg = CLaunchConfig(macro_mb=0, mini_size=0, L=0, threads_comp=6, threads_decomp=56)
             
             c_api_arch = TEMP_DIR / "c_api_archive.gcmp"
             c_api_ext_dir = TEMP_DIR / "c_api_extracted"
@@ -561,10 +562,10 @@ def main():
             input_paths = [str(DATA_DIR).encode('utf-8')]
             c_input_arr = (ctypes.c_char_p * len(input_paths))(*input_paths)
 
-            # 1. Build Archive via DLL
+            # 1. Build Archive via DLL (also testing fallback/warp-alignment normalization via legacy_cfg)
             dll.gpucompact_build_archive.argtypes = [ctypes.POINTER(ctypes.c_char_p), ctypes.c_int, ctypes.c_char_p, CLaunchConfig, ctypes.c_void_p, ctypes.c_void_p]
             dll.gpucompact_build_archive.restype = ctypes.c_int
-            ret = dll.gpucompact_build_archive(c_input_arr, len(input_paths), str(c_api_arch).encode('utf-8'), cfg, None, None)
+            ret = dll.gpucompact_build_archive(c_input_arr, len(input_paths), str(c_api_arch).encode('utf-8'), legacy_cfg, None, None)
             if ret != 0:
                 raise RuntimeError(f"C-API gpucompact_build_archive failed with code {ret}")
 
@@ -579,6 +580,8 @@ def main():
                 meta = json.loads(json_str)
                 if "files" not in meta or len(meta["files"]) == 0:
                     raise RuntimeError("C-API JSON metadata invalid!")
+                if meta["metadata"]["mini_size"] != 512 or meta["metadata"]["L_state"] != 1024:
+                    raise RuntimeError(f"C-API fallback defaults mismatch: {meta['metadata']}")
 
             # 3. Extract Archive via DLL
             dll.gpucompact_extract_archive.argtypes = [ctypes.c_char_p, ctypes.c_char_p, CLaunchConfig, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]

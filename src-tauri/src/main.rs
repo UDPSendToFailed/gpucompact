@@ -561,10 +561,10 @@ async fn decompress_archive(
 ) -> Result<String, String> {
     let config = CLaunchConfig {
         macro_mb: 4,
-        mini_size: 1024,
-        l_state: 2048,
-        threads_comp: 6,
-        threads_decomp: 56,
+        mini_size: 512,
+        l_state: 1024,
+        threads_comp: 32,
+        threads_decomp: 64,
     };
 
     tokio::task::spawn_blocking(move || {
@@ -610,10 +610,10 @@ async fn append_archive(
 ) -> Result<String, String> {
     let config = CLaunchConfig {
         macro_mb: 4,
-        mini_size: 1024,
-        l_state: 2048,
-        threads_comp: 6,
-        threads_decomp: 56,
+        mini_size: 512,
+        l_state: 1024,
+        threads_comp: 32,
+        threads_decomp: 64,
     };
 
     tokio::task::spawn_blocking(move || {

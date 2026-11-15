@@ -45,10 +45,10 @@ export class AppState {
   selectedProfile = $state<ProfilePreset>('balanced');
   customConfig = $state<CustomLaunchConfig>({
     macro_mb: 4,
-    mini_size: 1024,
-    l_state: 2048,
-    threads_comp: 6,
-    threads_decomp: 56,
+    mini_size: 512,
+    l_state: 1024,
+    threads_comp: 32,
+    threads_decomp: 64,
   });
 
   isOperating = $state<boolean>(false);
