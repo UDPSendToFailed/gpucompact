@@ -157,7 +157,7 @@ zrle_encode_kernel(const unsigned char *__restrict__ bwt,
         atomicAdd(&s_block_hist[idx + 1], 1);
       }
 
-      // MTF-1 Adaptive Ranking: prevents thrashing on alternating 2-symbol runs
+      // Move-To-Front (MTF) update
       if (idx == 1) {
         alphabet[1] = alphabet[0];
         alphabet[0] = c;
@@ -214,6 +214,7 @@ __global__ void build_tans_all_kernel(
     p_sum += s_p[i];
     weight_sum += (double)s_hist[i];
   }
+  __syncthreads();
   int remaining = L - p_sum;
   if (remaining > 0) {
     double weight = (double)s_hist[tid];
@@ -233,6 +234,7 @@ __global__ void build_tans_all_kernel(
       max_idx = i;
     }
   }
+  __syncthreads();
   if (L - p_sum > 0 && tid == max_idx && weight_sum > 0.0)
     s_p[tid] += (L - p_sum);
   __syncthreads();
