@@ -53,29 +53,9 @@ __device__ inline void cp_async_wait_all() {
 __global__ void bit_to_word_kernel(const unsigned int *__restrict__ bits,
                                    unsigned int *__restrict__ words, int n);
 
-__global__ void fill_sequence_kernel(int *__restrict__ out, int n);
-
 // -------------------------------------------------------------------------
 // BWT & TANS KERNEL PROTOTYPES
 // -------------------------------------------------------------------------
-__global__ void sa_4byte_keys_kernel(const unsigned char *__restrict__ T,
-                                     uint32_t *__restrict__ keys,
-                                     int *__restrict__ sa, int n);
-
-__global__ void sa_diff_32_kernel(const uint32_t *__restrict__ sorted_keys,
-                                  int *__restrict__ diff, int n);
-
-__global__ void sa_key_kernel(const int *__restrict__ rank,
-                              int *__restrict__ sa, uint64_t *__restrict__ keys,
-                              int n, int k, int rank_shift);
-
-__global__ void sa_diff_kernel(const uint64_t *__restrict__ sorted_keys,
-                               int *__restrict__ diff, int n);
-
-__global__ void sa_rank_kernel(const int *__restrict__ unique_ranks,
-                               const int *__restrict__ sa_sorted,
-                               int *__restrict__ rank, int n);
-
 __global__ void sa_8byte_keys_kernel(const unsigned char *__restrict__ T,
                                      uint64_t *__restrict__ keys,
                                      int *__restrict__ sa, int n);
@@ -144,15 +124,6 @@ __global__ void dense_pack_kernel(const uint64_t *__restrict__ in,
                                   const unsigned int *__restrict__ lens,
                                   uint64_t *__restrict__ out, int n, int max_w);
 
-__global__ void fill_key_kernel(const uint64_t *__restrict__ offsets,
-                                const int *__restrict__ sizes,
-                                const unsigned char *__restrict__ bwt,
-                                uint64_t *__restrict__ key, int num_chunks,
-                                int rank_shift);
-
-__global__ void build_lf_kernel(const int *__restrict__ F_to_L,
-                                int *__restrict__ LF, int n);
-
 __global__ void bwt_block_hist_kernel(const unsigned char *__restrict__ bwt,
                                       uint32_t *__restrict__ block_hist,
                                       int n, int num_blocks);
@@ -177,24 +148,6 @@ __global__ void anchor_scatter_kernel(const int2 *__restrict__ JD,
                                       unsigned char *__restrict__ out,
                                       const int *__restrict__ primary_idx,
                                       int n, int num_anchors);
-
-__global__ void jump_init_vec_kernel(const int *__restrict__ LF,
-                                     const int *__restrict__ primary_indices,
-                                     const uint64_t *__restrict__ chunk_offsets,
-                                     const int *__restrict__ chunk_sizes,
-                                     int2 *__restrict__ JD);
-
-__global__ void jump_step_vec_kernel(const int2 *__restrict__ JD_in,
-                                     int2 *__restrict__ JD_out,
-                                     const uint64_t *__restrict__ offsets,
-                                     const int *__restrict__ sizes);
-
-__global__ void jump_scatter_vec_kernel(const int2 *__restrict__ JD,
-                                        const unsigned char *__restrict__ bwt,
-                                        unsigned char *__restrict__ out,
-                                        const int *__restrict__ primary,
-                                        const uint64_t *__restrict__ offsets,
-                                        const int *__restrict__ sizes);
 
 __global__ void gpu_hash_kernel(const unsigned char *__restrict__ data,
                                 unsigned long long *__restrict__ d_hash,

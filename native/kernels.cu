@@ -24,81 +24,6 @@ __global__ void bit_to_word_kernel(const unsigned int *__restrict__ bits,
     words[idx] = (bits[idx] + 63) / 64;
 }
 
-__global__ void fill_sequence_kernel(int *__restrict__ out, int n) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < n)
-    out[idx] = idx;
-}
-
-__global__ void sa_4byte_keys_kernel(const unsigned char *__restrict__ T,
-                                     uint32_t *__restrict__ keys,
-                                     int *__restrict__ sa, int n) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= n)
-    return;
-  int i1 = idx + 1;
-  if (i1 >= n)
-    i1 -= n;
-  int i2 = idx + 2;
-  while (i2 >= n)
-    i2 -= n;
-  int i3 = idx + 3;
-  while (i3 >= n)
-    i3 -= n;
-  uint32_t c0 = (uint32_t)T[idx];
-  uint32_t c1 = (uint32_t)T[i1];
-  uint32_t c2 = (uint32_t)T[i2];
-  uint32_t c3 = (uint32_t)T[i3];
-  keys[idx] = (c0 << 24) | (c1 << 16) | (c2 << 8) | c3;
-  sa[idx] = idx;
-}
-
-__global__ void sa_diff_32_kernel(const uint32_t *__restrict__ sorted_keys,
-                                  int *__restrict__ diff, int n) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= n)
-    return;
-  if (idx == 0)
-    diff[idx] = 1;
-  else
-    diff[idx] = (sorted_keys[idx] != sorted_keys[idx - 1]) ? 1 : 0;
-}
-
-__global__ void sa_key_kernel(const int *__restrict__ rank,
-                              int *__restrict__ sa, uint64_t *__restrict__ keys,
-                              int n, int k, int rank_shift) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= n)
-    return;
-  int j = idx + k;
-  if (j >= n)
-    j -= n;
-  uint64_t r1 = (uint32_t)rank[idx];
-  uint64_t r2 = (uint32_t)rank[j];
-  keys[idx] = (r1 << rank_shift) | r2;
-  sa[idx] = idx;
-}
-
-__global__ void sa_diff_kernel(const uint64_t *__restrict__ sorted_keys,
-                               int *__restrict__ diff, int n) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= n)
-    return;
-  if (idx == 0)
-    diff[idx] = 1;
-  else
-    diff[idx] = (sorted_keys[idx] != sorted_keys[idx - 1]) ? 1 : 0;
-}
-
-__global__ void sa_rank_kernel(const int *__restrict__ unique_ranks,
-                               const int *__restrict__ sa_sorted,
-                               int *__restrict__ rank, int n) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= n)
-    return;
-  rank[sa_sorted[idx]] = unique_ranks[idx] - 1;
-}
-
 __global__ void sa_8byte_keys_kernel(const unsigned char *__restrict__ T,
                                      uint64_t *__restrict__ keys,
                                      int *__restrict__ sa, int n) {
@@ -602,32 +527,6 @@ __global__ void dense_pack_kernel(const uint64_t *__restrict__ in,
   }
 }
 
-__global__ void fill_key_kernel(const uint64_t *__restrict__ offsets,
-                                const int *__restrict__ sizes,
-                                const unsigned char *__restrict__ bwt,
-                                uint64_t *__restrict__ key, int num_chunks,
-                                int rank_shift) {
-  int cid = blockIdx.y;
-  if (cid >= num_chunks)
-    return;
-
-  int lid = blockIdx.x * blockDim.x + threadIdx.x;
-  int size = sizes[cid];
-  if (lid >= size)
-    return;
-
-  uint64_t off = offsets[cid];
-  key[off + lid] = (((uint64_t)bwt[off + lid]) << rank_shift) | (uint64_t)lid;
-}
-
-__global__ void build_lf_kernel(const int *__restrict__ F_to_L,
-                                int *__restrict__ LF, int n) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < n) {
-    LF[F_to_L[idx]] = idx;
-  }
-}
-
 __global__ void bwt_block_hist_kernel(const unsigned char *__restrict__ bwt,
                                       uint32_t *__restrict__ block_hist,
                                       int n, int num_blocks) {
@@ -763,65 +662,6 @@ __global__ void anchor_scatter_kernel(const int2 *__restrict__ JD,
     out[pos--] = bwt[curr];
     curr = LF[curr];
   } while ((curr & 127) != 0 && curr != prim);
-}
-
-__global__ void jump_init_vec_kernel(const int *__restrict__ LF,
-                                     const int *__restrict__ primary_indices,
-                                     const uint64_t *__restrict__ chunk_offsets,
-                                     const int *__restrict__ chunk_sizes,
-                                     int2 *__restrict__ JD) {
-  int cid = blockIdx.y, lid = blockIdx.x * blockDim.x + threadIdx.x,
-      size = chunk_sizes[cid];
-  if (lid >= size)
-    return;
-  uint64_t off = chunk_offsets[cid];
-  int gid = off + lid, prim = off + primary_indices[cid];
-  int lf_val = LF[gid];
-  int g_target = off + ((lf_val >= 0 && lf_val < size) ? lf_val : 0);
-  if (gid == prim) {
-    JD[gid] = make_int2(gid, 0);
-  } else {
-    JD[gid] = make_int2(g_target, 1);
-  }
-}
-
-__global__ void jump_step_vec_kernel(const int2 *__restrict__ JD_in,
-                                     int2 *__restrict__ JD_out,
-                                     const uint64_t *__restrict__ offsets,
-                                     const int *__restrict__ sizes) {
-  int cid = blockIdx.y, lid = blockIdx.x * blockDim.x + threadIdx.x;
-  int size = sizes[cid];
-  if (lid >= size)
-    return;
-  uint64_t off = offsets[cid];
-  int gid = off + lid;
-  int2 my_jd = JD_in[gid];
-  int target_idx = my_jd.x;
-  if (target_idx >= (int)off && target_idx < (int)off + size) {
-    int2 target_jd = JD_in[target_idx];
-    JD_out[gid] = make_int2(target_jd.x, my_jd.y + target_jd.y);
-  } else {
-    JD_out[gid] = my_jd;
-  }
-}
-
-__global__ void jump_scatter_vec_kernel(const int2 *__restrict__ JD,
-                                        const unsigned char *__restrict__ bwt,
-                                        unsigned char *__restrict__ out,
-                                        const int *__restrict__ primary,
-                                        const uint64_t *__restrict__ offsets,
-                                        const int *__restrict__ sizes) {
-  int cid = blockIdx.y, lid = blockIdx.x * blockDim.x + threadIdx.x,
-      size = sizes[cid];
-  if (lid >= size)
-    return;
-  uint64_t off = offsets[cid];
-  int gid = off + lid, prim = off + primary[cid];
-  int d_forw = (gid == prim) ? 0 : (size - JD[gid].y);
-  int target_pos = (int)off + size - 1 - d_forw;
-  if (target_pos >= (int)off && target_pos < (int)off + size) {
-    out[target_pos] = bwt[gid];
-  }
 }
 
 __global__ void gpu_hash_kernel(const unsigned char *__restrict__ data,
