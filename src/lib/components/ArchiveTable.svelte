@@ -24,6 +24,7 @@
     ArchiveFileEntry,
     ArchiveInspectResult,
     CollisionMode,
+    CollisionScanResult,
   } from "../types";
   import {
     Plus,
@@ -422,29 +423,50 @@
     }
   }
 
+  async function appendPathsWithCollisionCheck(paths: string[]) {
+    if (!appState.archivePath || !appState.archiveData || paths.length === 0)
+      return;
+
+    try {
+      const scan = await invoke<CollisionScanResult>(
+        "check_append_collisions",
+        {
+          archivePath: appState.archivePath,
+          inputs: paths,
+        },
+      );
+
+      if (scan.colliding_paths.length > 0) {
+        appState.collisionScan = scan;
+        appState.showCollisionModal = true;
+        appState.collisionCallback = (mode: CollisionMode | "cancel") => {
+          if (mode !== "cancel") {
+            performAppend(paths, mode);
+          }
+        };
+      } else {
+        performAppend(paths, "replace");
+      }
+    } catch (err: any) {
+      appState.showAlert("Pre-flight Error", `Collision scan failed: ${err}`);
+    }
+  }
+
   async function addFilesToArchive() {
     if (!appState.archivePath || !appState.archiveData) return;
 
     const selected = await open({ multiple: true });
     if (!selected) return;
     const paths = Array.isArray(selected) ? selected : [selected];
+    await appendPathsWithCollisionCheck(paths);
+  }
 
-    const existingSet = new Set(
-      appState.archiveData.files.map((f) => f.path.replace(/\\/g, "/")),
-    );
-    const hasCollision = paths.some((p) => {
-      const filename = p.split(/[/\\]/).pop() || p;
-      return existingSet.has(filename);
-    });
+  async function addFolderToArchive() {
+    if (!appState.archivePath || !appState.archiveData) return;
 
-    if (hasCollision) {
-      appState.showCollisionModal = true;
-      appState.collisionCallback = (mode: CollisionMode) => {
-        performAppend(paths, mode);
-      };
-    } else {
-      performAppend(paths, "replace");
-    }
+    const selected = await open({ directory: true, multiple: false });
+    if (!selected || typeof selected !== "string") return;
+    await appendPathsWithCollisionCheck([selected]);
   }
 
   async function performAppend(paths: string[], collisionMode: CollisionMode) {
@@ -610,7 +632,17 @@
         appState.selectPath(item.fullPath);
       }
     }
-    contextMenu = { x: e.clientX, y: e.clientY, item };
+    const menuWidth = 240;
+    const menuHeight = 160;
+    const clampedX = Math.max(
+      12,
+      Math.min(e.clientX, window.innerWidth - menuWidth - 12),
+    );
+    const clampedY = Math.max(
+      12,
+      Math.min(e.clientY, window.innerHeight - menuHeight - 12),
+    );
+    contextMenu = { x: clampedX, y: clampedY, item };
   }
 
   function closeContextMenu() {
@@ -703,6 +735,14 @@
         >
           <Plus size={14} class="text-indigo-400 shrink-0" />
           <span>Add Files...</span>
+        </button>
+
+        <button
+          onclick={addFolderToArchive}
+          class="px-3.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-medium text-white flex items-center space-x-1.5 transition-all whitespace-nowrap active:scale-95 cursor-pointer"
+        >
+          <Folder size={14} class="text-indigo-400 shrink-0" />
+          <span>Add Folder...</span>
         </button>
 
         {#if appState.selectedFilePaths.size > 0}
