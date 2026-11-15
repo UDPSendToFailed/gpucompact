@@ -208,17 +208,16 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
   cub::DeviceScan::InclusiveSum(d_temp_storage, t_bytes, d_diff,
                                 d_unique_ranks, n, stream);
 
+  CUDA_CHECK(cudaMemcpyAsync(host_last_rank, d_unique_ranks + n - 1,
+                             sizeof(int), cudaMemcpyDeviceToHost, stream));
+
   sa_rank_kernel<<<blocks, 256, 0, stream>>>(d_unique_ranks,
                                              d_sa_db.Current(), d_rank, n);
 
   bool sorted = false;
-  if (n <= 1024) {
-    CUDA_CHECK(cudaMemcpyAsync(host_last_rank, d_unique_ranks + n - 1,
-                               sizeof(int), cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    if (*host_last_rank == n)
-      sorted = true;
-  }
+  CUDA_CHECK(cudaStreamSynchronize(stream));
+  if (*host_last_rank == n)
+    sorted = true;
 
   // If 4-byte prefixes are not unique, continue doubling from k = 4 (skips k=1, 2)
   if (!sorted) {
@@ -239,20 +238,16 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
       cub::DeviceScan::InclusiveSum(d_temp_storage, t_bytes, d_diff,
                                     d_unique_ranks, n, stream);
 
+      CUDA_CHECK(cudaMemcpyAsync(host_last_rank, d_unique_ranks + n - 1,
+                                 sizeof(int), cudaMemcpyDeviceToHost, stream));
+
       sa_rank_kernel<<<blocks, 256, 0, stream>>>(d_unique_ranks,
                                                  d_sa_db.Current(), d_rank, n);
 
-      // Only synchronize and poll for early exit starting at round 3 (effective prefix >= 64 bytes)
-      // or on the final iteration, allowing the GPU to queue early rounds back-to-back without CPU stalls.
-      if (iter >= 3 || n <= 1024 || iter == max_iter - 1) {
-        CUDA_CHECK(cudaMemcpyAsync(host_last_rank, d_unique_ranks + n - 1,
-                                   sizeof(int), cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-
-        if (*host_last_rank == n) {
-          sorted = true;
-          break; // Early exit when Suffix Array is 100% sorted
-        }
+      CUDA_CHECK(cudaStreamSynchronize(stream));
+      if (*host_last_rank == n) {
+        sorted = true;
+        break; // Early exit when Suffix Array is 100% sorted
       }
 
       k *= 2;
