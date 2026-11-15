@@ -76,6 +76,34 @@ __global__ void sa_rank_kernel(const int *__restrict__ unique_ranks,
                                const int *__restrict__ sa_sorted,
                                int *__restrict__ rank, int n);
 
+__global__ void sa_8byte_keys_kernel(const unsigned char *__restrict__ T,
+                                     uint64_t *__restrict__ keys,
+                                     int *__restrict__ sa, int n);
+
+__global__ void sa_pass0_bucket_kernel(const uint64_t *__restrict__ sorted_keys,
+                                       int *__restrict__ bucket_diff,
+                                       uint8_t *__restrict__ tied_flags,
+                                       int n);
+
+__global__ void sa_set_rank_kernel(const int *__restrict__ bucket_starts,
+                                   const int *__restrict__ sa_sorted,
+                                   int *__restrict__ rank, int n);
+
+__global__ void sa_active_key_kernel(const int *__restrict__ rank,
+                                     const int *__restrict__ active_sa,
+                                     uint64_t *__restrict__ keys,
+                                     int *__restrict__ sa_out,
+                                     int n, int m_active, int k_mod,
+                                     int rank_shift);
+
+__global__ void sa_active_bucket_kernel(const uint64_t *__restrict__ sorted_keys,
+                                        const int *__restrict__ active_pos,
+                                        const int *__restrict__ active_sa_sorted,
+                                        int *__restrict__ sa_final,
+                                        int *__restrict__ bucket_diff,
+                                        uint8_t *__restrict__ tied_flags,
+                                        int m_active);
+
 __global__ void extract_bwt_kernel(const int *__restrict__ sa,
                                    const unsigned char *__restrict__ data,
                                    unsigned char *__restrict__ bwt,

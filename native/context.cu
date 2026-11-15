@@ -21,8 +21,17 @@
 #include <cmath>
 #include <cstring>
 #include <cub/cub.cuh>
+#include <thrust/iterator/counting_iterator.h>
 #include <iostream>
 #include <stdexcept>
+
+namespace {
+struct MaxOp {
+  __device__ __forceinline__ int operator()(const int &a, const int &b) const {
+    return (a > b) ? a : b;
+  }
+};
+} // namespace
 
 #define CUDA_CHECK(call)                                                       \
   do {                                                                         \
@@ -60,6 +69,10 @@ CompressionContext::CompressionContext(int macro_bytes, int mini_bytes,
   CUDA_CHECK(cudaMalloc(&d_keys_alt, macro_size * sizeof(uint64_t)));
   CUDA_CHECK(cudaMalloc(&d_diff, macro_size * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&d_unique_ranks, macro_size * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_active_pos, macro_size * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_active_pos_alt, macro_size * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_active_sa, macro_size * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_active_sa_alt, macro_size * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&d_bwt, macro_size));
   CUDA_CHECK(cudaMalloc(&d_primary_idx, sizeof(int)));
 
@@ -88,15 +101,21 @@ CompressionContext::CompressionContext(int macro_bytes, int mini_bytes,
   CUDA_CHECK(cudaMalloc(&d_overflow_flag, sizeof(uint32_t)));
   CUDA_CHECK(cudaMallocHost(&host_overflow_flag, sizeof(uint32_t)));
 
-  size_t sort_bytes = 0, scan_bytes = 0;
+  size_t sort_bytes = 0, scan_bytes = 0, max_scan_bytes = 0, select_bytes = 0;
   cub::DoubleBuffer<uint64_t> d_keys_db(d_keys, d_keys_alt);
   cub::DoubleBuffer<int> d_sa_db(d_sa, d_sa_alt);
   cub::DeviceRadixSort::SortPairs(nullptr, sort_bytes, d_keys_db, d_sa_db,
                                   macro_size, 0, 64, stream);
   cub::DeviceScan::InclusiveSum(nullptr, scan_bytes, d_diff, d_unique_ranks,
                                 macro_size, stream);
+  cub::DeviceScan::InclusiveScan(nullptr, max_scan_bytes, d_diff,
+                                 d_unique_ranks, MaxOp(), macro_size, stream);
+  cub::DeviceSelect::Flagged(nullptr, select_bytes,
+                             thrust::counting_iterator<int>(0), d_bwt,
+                             d_active_pos, d_primary_idx, macro_size, stream);
 
-  temp_storage_bytes = std::max(sort_bytes, scan_bytes) + 65536;
+  temp_storage_bytes =
+      std::max({sort_bytes, scan_bytes, max_scan_bytes, select_bytes}) + 65536;
   CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
 
   CUDA_CHECK(cudaEventCreate(&e_start));
@@ -119,6 +138,10 @@ CompressionContext::~CompressionContext() {
   cudaFree(d_keys_alt);
   cudaFree(d_diff);
   cudaFree(d_unique_ranks);
+  cudaFree(d_active_pos);
+  cudaFree(d_active_pos_alt);
+  cudaFree(d_active_sa);
+  cudaFree(d_active_sa_alt);
   cudaFree(d_bwt);
   cudaFree(d_primary_idx);
   cudaFree(d_out_symbols);
@@ -190,64 +213,97 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
   cub::DoubleBuffer<uint64_t> d_keys_db(d_keys, d_keys_alt);
   cub::DoubleBuffer<int> d_sa_db(d_sa, d_sa_alt);
 
-  // PASS 0: 4-Byte Coarse Jumpstart (32-bit single-pass sort)
-  // Packs 4 consecutive cyclic bytes into uint32_t and sorts in one 32-bit pass
-  cub::DoubleBuffer<uint32_t> d_keys32_db(
-      reinterpret_cast<uint32_t *>(d_keys),
-      reinterpret_cast<uint32_t *>(d_keys_alt));
-  sa_4byte_keys_kernel<<<blocks, 256, 0, stream>>>(
-      d_data, d_keys32_db.Current(), d_sa_db.Current(), n);
+  // PASS 0: 8-Byte Coarse Jumpstart (64-bit single-pass sort)
+  sa_8byte_keys_kernel<<<blocks, 256, 0, stream>>>(
+      d_data, d_keys_db.Current(), d_sa_db.Current(), n);
 
   size_t t_bytes = temp_storage_bytes;
-  cub::DeviceRadixSort::SortPairs(d_temp_storage, t_bytes, d_keys32_db,
-                                  d_sa_db, n, 0, 32, stream);
+  cub::DeviceRadixSort::SortPairs(d_temp_storage, t_bytes, d_keys_db,
+                                  d_sa_db, n, 0, 64, stream);
 
-  sa_diff_32_kernel<<<blocks, 256, 0, stream>>>(d_keys32_db.Current(), d_diff, n);
+  int *d_sa_final = d_sa_db.Current();
+
+  sa_pass0_bucket_kernel<<<blocks, 256, 0, stream>>>(
+      d_keys_db.Current(), d_diff, d_bwt, n);
 
   t_bytes = temp_storage_bytes;
-  cub::DeviceScan::InclusiveSum(d_temp_storage, t_bytes, d_diff,
-                                d_unique_ranks, n, stream);
+  cub::DeviceScan::InclusiveScan(d_temp_storage, t_bytes, d_diff,
+                                 d_unique_ranks, MaxOp(), n, stream);
 
-  CUDA_CHECK(cudaMemcpyAsync(host_last_rank, d_unique_ranks + n - 1,
-                             sizeof(int), cudaMemcpyDeviceToHost, stream));
+  sa_set_rank_kernel<<<blocks, 256, 0, stream>>>(d_unique_ranks, d_sa_final,
+                                                 d_rank, n);
 
-  sa_rank_kernel<<<blocks, 256, 0, stream>>>(d_unique_ranks,
-                                             d_sa_db.Current(), d_rank, n);
+  t_bytes = temp_storage_bytes;
+  cub::DeviceSelect::Flagged(d_temp_storage, t_bytes,
+                             thrust::counting_iterator<int>(0), d_bwt,
+                             d_active_pos, d_primary_idx, n, stream);
 
-  bool sorted = false;
+  t_bytes = temp_storage_bytes;
+  cub::DeviceSelect::Flagged(d_temp_storage, t_bytes, d_sa_final, d_bwt,
+                             d_active_sa, d_primary_idx, n, stream);
+
+  CUDA_CHECK(cudaMemcpyAsync(host_last_rank, d_primary_idx, sizeof(int),
+                             cudaMemcpyDeviceToHost, stream));
   CUDA_CHECK(cudaStreamSynchronize(stream));
-  if (*host_last_rank == n)
-    sorted = true;
 
-  // If 4-byte prefixes are not unique, continue doubling from k = 4 (skips k=1, 2)
+  int m_active = *host_last_rank;
+  bool sorted = (m_active == 0);
+
+  // Active-set doubling from k = 8 over only the remaining tied suffixes
   if (!sorted) {
-    int k = 4;
-    int max_iter = rank_bits + 2;
-    for (int iter = 0; iter < max_iter; iter++) {
-      sa_key_kernel<<<blocks, 256, 0, stream>>>(d_rank, d_sa_db.Current(),
-                                                d_keys_db.Current(), n, k % n,
-                                                rank_bits);
+    int *curr_pos = d_active_pos;
+    int *next_pos = d_active_pos_alt;
+    int *curr_sa = d_active_sa;
+    int *next_sa = d_active_sa_alt;
+
+    int k = 8;
+    while (k < n) {
+      int active_blocks = (m_active + 255) / 256;
+
+      sa_active_key_kernel<<<active_blocks, 256, 0, stream>>>(
+          d_rank, curr_sa, d_keys_db.Current(), next_sa, n, m_active, k % n,
+          rank_bits);
+
+      cub::DoubleBuffer<int> active_sa_db(next_sa, curr_sa);
+      t_bytes = temp_storage_bytes;
+      cub::DeviceRadixSort::SortPairs(d_temp_storage, t_bytes, d_keys_db,
+                                      active_sa_db, m_active, 0, key_bits,
+                                      stream);
+
+      sa_active_bucket_kernel<<<active_blocks, 256, 0, stream>>>(
+          d_keys_db.Current(), curr_pos, active_sa_db.Current(), d_sa_final,
+          d_diff, d_bwt, m_active);
 
       t_bytes = temp_storage_bytes;
-      cub::DeviceRadixSort::SortPairs(d_temp_storage, t_bytes, d_keys_db, d_sa_db,
-                                      n, 0, key_bits, stream);
+      cub::DeviceScan::InclusiveScan(d_temp_storage, t_bytes, d_diff,
+                                     d_unique_ranks, MaxOp(), m_active,
+                                     stream);
 
-      sa_diff_kernel<<<blocks, 256, 0, stream>>>(d_keys_db.Current(), d_diff, n);
+      sa_set_rank_kernel<<<active_blocks, 256, 0, stream>>>(
+          d_unique_ranks, active_sa_db.Current(), d_rank, m_active);
 
       t_bytes = temp_storage_bytes;
-      cub::DeviceScan::InclusiveSum(d_temp_storage, t_bytes, d_diff,
-                                    d_unique_ranks, n, stream);
+      cub::DeviceSelect::Flagged(d_temp_storage, t_bytes, curr_pos, d_bwt,
+                                 next_pos, d_primary_idx, m_active, stream);
 
-      CUDA_CHECK(cudaMemcpyAsync(host_last_rank, d_unique_ranks + n - 1,
-                                 sizeof(int), cudaMemcpyDeviceToHost, stream));
+      t_bytes = temp_storage_bytes;
+      cub::DeviceSelect::Flagged(d_temp_storage, t_bytes,
+                                 active_sa_db.Current(), d_bwt,
+                                 active_sa_db.Alternate(), d_primary_idx,
+                                 m_active, stream);
 
-      sa_rank_kernel<<<blocks, 256, 0, stream>>>(d_unique_ranks,
-                                                 d_sa_db.Current(), d_rank, n);
-
+      CUDA_CHECK(cudaMemcpyAsync(host_last_rank, d_primary_idx, sizeof(int),
+                                 cudaMemcpyDeviceToHost, stream));
       CUDA_CHECK(cudaStreamSynchronize(stream));
-      if (*host_last_rank == n) {
+
+      m_active = *host_last_rank;
+      std::swap(curr_pos, next_pos);
+      curr_sa = active_sa_db.Alternate();
+      next_sa = active_sa_db.Current();
+
+      if (m_active == 0) {
         sorted = true;
-        break; // Early exit when Suffix Array is 100% sorted
+        break;
       }
 
       k *= 2;
@@ -274,7 +330,7 @@ void CompressionContext::compress_chunk(int threads_comp, int mini_chunk_size) {
     return;
   }
 
-  extract_bwt_kernel<<<blocks, 256, 0, stream>>>(d_sa_db.Current(), d_data,
+  extract_bwt_kernel<<<blocks, 256, 0, stream>>>(d_sa_final, d_data,
                                                  d_bwt, d_primary_idx, n);
   CUDA_CHECK(cudaMemcpyAsync(&primary_idx, d_primary_idx, sizeof(int),
                              cudaMemcpyDeviceToHost, stream));

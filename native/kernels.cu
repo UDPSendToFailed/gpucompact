@@ -99,6 +99,91 @@ __global__ void sa_rank_kernel(const int *__restrict__ unique_ranks,
   rank[sa_sorted[idx]] = unique_ranks[idx] - 1;
 }
 
+__global__ void sa_8byte_keys_kernel(const unsigned char *__restrict__ T,
+                                     uint64_t *__restrict__ keys,
+                                     int *__restrict__ sa, int n) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= n)
+    return;
+  uint64_t key = 0;
+  if (idx + 7 < n) {
+    key = ((uint64_t)T[idx] << 56) | ((uint64_t)T[idx + 1] << 48) |
+          ((uint64_t)T[idx + 2] << 40) | ((uint64_t)T[idx + 3] << 32) |
+          ((uint64_t)T[idx + 4] << 24) | ((uint64_t)T[idx + 5] << 16) |
+          ((uint64_t)T[idx + 6] << 8) | ((uint64_t)T[idx + 7]);
+  } else {
+    for (int k = 0; k < 8; k++) {
+      int j = idx + k;
+      while (j >= n)
+        j -= n;
+      key = (key << 8) | (uint64_t)T[j];
+    }
+  }
+  keys[idx] = key;
+  sa[idx] = idx;
+}
+
+__global__ void sa_pass0_bucket_kernel(const uint64_t *__restrict__ sorted_keys,
+                                       int *__restrict__ bucket_diff,
+                                       uint8_t *__restrict__ tied_flags,
+                                       int n) {
+  int pos = blockIdx.x * blockDim.x + threadIdx.x;
+  if (pos >= n)
+    return;
+  uint64_t cur = sorted_keys[pos];
+  bool eq_prev = (pos > 0) && (cur == sorted_keys[pos - 1]);
+  bool eq_next = (pos + 1 < n) && (cur == sorted_keys[pos + 1]);
+  bucket_diff[pos] = eq_prev ? 0 : pos;
+  tied_flags[pos] = (eq_prev || eq_next) ? 1 : 0;
+}
+
+__global__ void sa_set_rank_kernel(const int *__restrict__ bucket_starts,
+                                   const int *__restrict__ sa_sorted,
+                                   int *__restrict__ rank, int n) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= n)
+    return;
+  rank[sa_sorted[idx]] = bucket_starts[idx];
+}
+
+__global__ void sa_active_key_kernel(const int *__restrict__ rank,
+                                     const int *__restrict__ active_sa,
+                                     uint64_t *__restrict__ keys,
+                                     int *__restrict__ sa_out,
+                                     int n, int m_active, int k_mod,
+                                     int rank_shift) {
+  int m = blockIdx.x * blockDim.x + threadIdx.x;
+  if (m >= m_active)
+    return;
+  int s = active_sa[m];
+  int j = s + k_mod;
+  if (j >= n)
+    j -= n;
+  uint64_t r1 = (uint32_t)rank[s];
+  uint64_t r2 = (uint32_t)rank[j];
+  keys[m] = (r1 << rank_shift) | r2;
+  sa_out[m] = s;
+}
+
+__global__ void sa_active_bucket_kernel(const uint64_t *__restrict__ sorted_keys,
+                                        const int *__restrict__ active_pos,
+                                        const int *__restrict__ active_sa_sorted,
+                                        int *__restrict__ sa_final,
+                                        int *__restrict__ bucket_diff,
+                                        uint8_t *__restrict__ tied_flags,
+                                        int m_active) {
+  int m = blockIdx.x * blockDim.x + threadIdx.x;
+  if (m >= m_active)
+    return;
+  int pos = active_pos[m];
+  sa_final[pos] = active_sa_sorted[m];
+  uint64_t cur = sorted_keys[m];
+  bool eq_prev = (m > 0) && (cur == sorted_keys[m - 1]);
+  bool eq_next = (m + 1 < m_active) && (cur == sorted_keys[m + 1]);
+  bucket_diff[m] = eq_prev ? 0 : pos;
+  tied_flags[m] = (eq_prev || eq_next) ? 1 : 0;
+}
+
 __global__ void extract_bwt_kernel(const int *__restrict__ sa,
                                    const unsigned char *__restrict__ data,
                                    unsigned char *__restrict__ bwt,

@@ -49,6 +49,10 @@ public:
   uint64_t *d_keys_alt = nullptr;
   int *d_diff = nullptr;
   int *d_unique_ranks = nullptr;
+  int *d_active_pos = nullptr;
+  int *d_active_pos_alt = nullptr;
+  int *d_active_sa = nullptr;
+  int *d_active_sa_alt = nullptr;
   uint8_t *d_bwt = nullptr;
   int *d_primary_idx = nullptr;
 
