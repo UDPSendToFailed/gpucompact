@@ -608,6 +608,70 @@ __global__ void bwt_scatter_lf_kernel(const unsigned char *__restrict__ bwt,
   }
 }
 
+__global__ void anchor_init_kernel(const int *__restrict__ LF,
+                                   const int *__restrict__ primary_idx,
+                                   int2 *__restrict__ JD_in,
+                                   int n, int num_anchors) {
+  int aid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (aid > num_anchors)
+    return;
+
+  int prim = *primary_idx;
+  if (aid == num_anchors && (prim & 127) == 0) {
+    JD_in[aid] = make_int2(aid, 0);
+    return;
+  }
+
+  int start_gid = (aid < num_anchors) ? (aid << 7) : prim;
+  if (start_gid == prim) {
+    JD_in[aid] = make_int2(aid, 0);
+    return;
+  }
+
+  int curr = LF[start_gid];
+  int steps = 1;
+  while ((curr & 127) != 0 && curr != prim) {
+    curr = LF[curr];
+    steps++;
+  }
+  int next_aid = ((curr & 127) == 0) ? (curr >> 7) : num_anchors;
+  JD_in[aid] = make_int2(next_aid, steps);
+}
+
+__global__ void anchor_jump_step_kernel(const int2 *__restrict__ JD_in,
+                                        int2 *__restrict__ JD_out,
+                                        int total_anchors) {
+  int aid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (aid >= total_anchors)
+    return;
+  int2 my_jd = JD_in[aid];
+  int2 target_jd = JD_in[my_jd.x];
+  JD_out[aid] = make_int2(target_jd.x, my_jd.y + target_jd.y);
+}
+
+__global__ void anchor_scatter_kernel(const int2 *__restrict__ JD,
+                                      const int *__restrict__ LF,
+                                      const unsigned char *__restrict__ bwt,
+                                      unsigned char *__restrict__ out,
+                                      const int *__restrict__ primary_idx,
+                                      int n, int num_anchors) {
+  int aid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (aid > num_anchors)
+    return;
+
+  int prim = *primary_idx;
+  if (aid == num_anchors && (prim & 127) == 0)
+    return;
+
+  int start_gid = (aid < num_anchors) ? (aid << 7) : prim;
+  int pos = (start_gid == prim) ? (n - 1) : (JD[aid].y - 1);
+  int curr = start_gid;
+  do {
+    out[pos--] = bwt[curr];
+    curr = LF[curr];
+  } while ((curr & 127) != 0 && curr != prim);
+}
+
 __global__ void jump_init_vec_kernel(const int *__restrict__ LF,
                                      const int *__restrict__ primary_indices,
                                      const uint64_t *__restrict__ chunk_offsets,

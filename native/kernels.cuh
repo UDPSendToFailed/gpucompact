@@ -133,6 +133,22 @@ __global__ void bwt_scatter_lf_kernel(const unsigned char *__restrict__ bwt,
                                       int *__restrict__ LF,
                                       int n, int num_blocks);
 
+__global__ void anchor_init_kernel(const int *__restrict__ LF,
+                                   const int *__restrict__ primary_idx,
+                                   int2 *__restrict__ JD_in,
+                                   int n, int num_anchors);
+
+__global__ void anchor_jump_step_kernel(const int2 *__restrict__ JD_in,
+                                        int2 *__restrict__ JD_out,
+                                        int total_anchors);
+
+__global__ void anchor_scatter_kernel(const int2 *__restrict__ JD,
+                                      const int *__restrict__ LF,
+                                      const unsigned char *__restrict__ bwt,
+                                      unsigned char *__restrict__ out,
+                                      const int *__restrict__ primary_idx,
+                                      int n, int num_anchors);
+
 __global__ void jump_init_vec_kernel(const int *__restrict__ LF,
                                      const int *__restrict__ primary_indices,
                                      const uint64_t *__restrict__ chunk_offsets,

@@ -476,9 +476,6 @@ DecompressionContext::DecompressionContext(int macro_bytes, int mini_bytes,
   // -------------------------------------------------------------------------
   CUDA_CHECK(cudaStreamSynchronize(stream));
   {
-    int blocks_u = (macro_size + 255) / 256;
-    int steps = (int)std::ceil(std::log2((double)macro_size));
-
     *host_uncomp_size = macro_size;
     *host_primary_idx = 0;
 
@@ -503,21 +500,27 @@ DecompressionContext::DecompressionContext(int macro_bytes, int mini_bytes,
     bwt_scatter_lf_kernel<<<hist_blocks, 256, 0, stream>>>(
         d_bwt, d_block_offsets, d_global_LF, macro_size, hist_blocks);
 
-    dim3 grid_p(blocks_u, 1);
-    dim3 block_p(256, 1);
-    jump_init_vec_kernel<<<grid_p, block_p, 0, stream>>>(
-        d_global_LF, d_primary_idx, d_offsets, d_sizes, d_JD_in);
+    int num_anchors = (macro_size + 127) / 128;
+    int total_anchors = num_anchors + 1;
+    int anchor_blocks = (total_anchors + 255) / 256;
+    int anchor_steps = (total_anchors > 1)
+                           ? (int)std::ceil(std::log2((double)total_anchors))
+                           : 0;
+
+    anchor_init_kernel<<<anchor_blocks, 256, 0, stream>>>(
+        d_global_LF, d_primary_idx, d_JD_in, macro_size, num_anchors);
 
     int2 *curr_JD = d_JD_in;
     int2 *next_JD = d_JD_out;
-    for (int s = 0; s < steps; s++) {
-      jump_step_vec_kernel<<<grid_p, block_p, 0, stream>>>(
-          curr_JD, next_JD, d_offsets, d_sizes);
+    for (int s = 0; s < anchor_steps; s++) {
+      anchor_jump_step_kernel<<<anchor_blocks, 256, 0, stream>>>(
+          curr_JD, next_JD, total_anchors);
       std::swap(curr_JD, next_JD);
     }
 
-    jump_scatter_vec_kernel<<<grid_p, block_p, 0, stream>>>(
-        curr_JD, d_bwt, d_data, d_primary_idx, d_offsets, d_sizes);
+    anchor_scatter_kernel<<<anchor_blocks, 256, 0, stream>>>(
+        curr_JD, d_global_LF, d_bwt, d_data, d_primary_idx, macro_size,
+        num_anchors);
 
     CUDA_CHECK(cudaStreamEndCapture(stream, &graph));
 #if CUDART_VERSION >= 11040
@@ -676,7 +679,6 @@ bool DecompressionContext::decompress_chunk(int threads_decomp,
       CUDA_CHECK(cudaMemcpyAsync(d_primary_idx, host_primary_idx, sizeof(int),
                                  cudaMemcpyHostToDevice, stream));
 
-      int blocks_u = (uncomp_size + 255) / 256;
       int hist_blocks = (uncomp_size + 4095) / 4096;
       uint32_t *d_block_hist = reinterpret_cast<uint32_t *>(d_keys);
       uint32_t *d_block_offsets = reinterpret_cast<uint32_t *>(d_keys_alt);
@@ -691,23 +693,27 @@ bool DecompressionContext::decompress_chunk(int threads_decomp,
       bwt_scatter_lf_kernel<<<hist_blocks, 256, 0, stream>>>(
           d_bwt, d_block_offsets, d_global_LF, uncomp_size, hist_blocks);
 
-      dim3 grid_p(blocks_u, 1);
-      dim3 block_p(256, 1);
-      jump_init_vec_kernel<<<grid_p, block_p, 0, stream>>>(
-          d_global_LF, d_primary_idx, d_offsets, d_sizes, d_JD_in);
+      int num_anchors = (uncomp_size + 127) / 128;
+      int total_anchors = num_anchors + 1;
+      int anchor_blocks = (total_anchors + 255) / 256;
+      int anchor_steps = (total_anchors > 1)
+                             ? (int)std::ceil(std::log2((double)total_anchors))
+                             : 0;
+
+      anchor_init_kernel<<<anchor_blocks, 256, 0, stream>>>(
+          d_global_LF, d_primary_idx, d_JD_in, uncomp_size, num_anchors);
 
       int2 *curr_JD = d_JD_in;
       int2 *next_JD = d_JD_out;
-      int steps = (int)std::ceil(std::log2(uncomp_size));
-
-      for (int s = 0; s < steps; s++) {
-        jump_step_vec_kernel<<<grid_p, block_p, 0, stream>>>(
-            curr_JD, next_JD, d_offsets, d_sizes);
+      for (int s = 0; s < anchor_steps; s++) {
+        anchor_jump_step_kernel<<<anchor_blocks, 256, 0, stream>>>(
+            curr_JD, next_JD, total_anchors);
         std::swap(curr_JD, next_JD);
       }
 
-      jump_scatter_vec_kernel<<<grid_p, block_p, 0, stream>>>(
-          curr_JD, d_bwt, d_data, d_primary_idx, d_offsets, d_sizes);
+      anchor_scatter_kernel<<<anchor_blocks, 256, 0, stream>>>(
+          curr_JD, d_global_LF, d_bwt, d_data, d_primary_idx, uncomp_size,
+          num_anchors);
     }
 
     CUDA_CHECK(cudaMemcpyAsync(host_out, d_data, uncomp_size,
